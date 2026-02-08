@@ -1,0 +1,1795 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SiteLens - Architect Site Visit Tool</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- PDF.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    </script>
+
+    <!-- Persistence & Export -->
+    <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+
+    <style>
+        /* Custom scrollbar for a cleaner look */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        /* Disable pull-to-refresh on mobile */
+        body {
+            overscroll-behavior-y: contain;
+        }
+
+        .pin-number {
+            font-size: 10px;
+            font-weight: 800;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-50 text-gray-900 font-sans overflow-hidden">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect, useMemo, useCallback } = React;
+
+        // --- ICONS ---
+        const IconBase = ({ children, size = 24, className = "", ...props }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+                {children}
+            </svg>
+        );
+
+        const Camera = (props) => <IconBase {...props}><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" /><circle cx="12" cy="13" r="3" /></IconBase>;
+        const MapPin = (props) => <IconBase {...props}><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></IconBase>;
+        const FileText = (props) => <IconBase {...props}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" /></IconBase>;
+        const Download = (props) => <IconBase {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></IconBase>;
+        const Plus = (props) => <IconBase {...props}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></IconBase>;
+        const X = (props) => <IconBase {...props}><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></IconBase>;
+        const ChevronLeft = (props) => <IconBase {...props}><polyline points="15 18 9 12 15 6" /></IconBase>;
+        const ChevronRight = (props) => <IconBase {...props}><polyline points="9 18 15 12 9 6" /></IconBase>;
+        const Check = (props) => <IconBase {...props}><polyline points="20 6 9 17 4 12" /></IconBase>;
+        const MoreVertical = (props) => <IconBase {...props}><circle cx="12" cy="12" r="1" /><circle cx="12" cy="5" r="1" /><circle cx="12" cy="19" r="1" /></IconBase>;
+        const Trash2 = (props) => <IconBase {...props}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></IconBase>;
+        const PenTool = (props) => <IconBase {...props}><path d="M12 19l7-7 3 3-7 7-3-3z" /><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" /><path d="M2 2l7.586 7.586" /><circle cx="11" cy="11" r="2" /></IconBase>;
+        const Save = (props) => <IconBase {...props}><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></IconBase>;
+        const Undo = (props) => <IconBase {...props}><path d="M3 7v6h6" /><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" /></IconBase>;
+        const ZoomIn = (props) => <IconBase {...props}><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="11" y1="8" x2="11" y2="14" /><line x1="8" y1="11" x2="14" y2="11" /></IconBase>;
+        const ZoomOut = (props) => <IconBase {...props}><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="8" y1="11" x2="14" y2="11" /></IconBase>;
+        const Sun = (props) => <IconBase {...props}><circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" /></IconBase>;
+        const Users = (props) => <IconBase {...props}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></IconBase>;
+        const Hammer = (props) => <IconBase {...props}><path d="M15 12l-8.5 8.5c-.83.83-2.17.83-3 0 0 0 0 0 0 0a2.12 2.12 0 0 1 0-3L12 9" /><path d="M17.64 6.36L22 2l-3.33-3.33a.85.85 0 0 0-1.2 0L13.13 3" /><path d="M20 6.36l-5.36 5.37" /><path d="M13.13 3A2.83 2.83 0 0 0 8.87 7.13l.86.87" /></IconBase>;
+        const Info = (props) => <IconBase {...props}><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></IconBase>;
+        const UploadCloud = (props) => <IconBase {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></IconBase>;
+        const Hexagon = (props) => <IconBase {...props}><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" /></IconBase>;
+        const Activity = (props) => <IconBase {...props}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></IconBase>;
+        const Cloud = (props) => <IconBase {...props}><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" /></IconBase>;
+        const AlertTriangle = (props) => <IconBase {...props}><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></IconBase>;
+        const Minimize2 = (props) => <IconBase {...props}><polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" /><line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" /></IconBase>;
+        const Slash = (props) => <IconBase {...props}><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></IconBase>;
+        const Anchor = (props) => <IconBase {...props}><circle cx="12" cy="5" r="3" /><line x1="12" y1="22" x2="12" y2="8" /><path d="M5 12H2a10 10 0 0 0 20 0h-3" /></IconBase>;
+        const HelpCircle = (props) => <IconBase {...props}><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></IconBase>;
+
+
+        // --- UTILS ---
+        const generateId = () => Math.random().toString(36).substr(2, 9);
+        const formatDate = (dateString) => new Date(dateString).toLocaleDateString('en-US', {
+            weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+        });
+        // Default plan is a simple image
+        const DEMO_PLAN_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9a/Sample_Floorplan.jpg/1200px-Sample_Floorplan.jpg";
+
+        // --- DATABASE ---
+        const db = new Dexie('SiteVisitsDB');
+        db.version(2).stores({
+            projects: 'id, name',
+            plans: 'id, projectId'
+        });
+
+        // --- API HELPERS ---
+        const fetchWeather = async (address) => {
+            if (!address) return null;
+            try {
+                const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`;
+                const geoRes = await fetch(geoUrl, { headers: { 'User-Agent': 'SiteLens/1.0' } });
+                const geoData = await geoRes.json();
+                if (!geoData || geoData.length === 0) throw new Error("Address not found");
+
+                const { lat, lon } = geoData[0];
+                const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&temperature_unit=fahrenheit`;
+                const weatherRes = await fetch(weatherUrl);
+                const weatherData = await weatherRes.json();
+                const w = weatherData.current_weather;
+
+                // Map WMO code to string (simplified)
+                const weatherCode = w.weathercode;
+                let condition = "Clear";
+                if (weatherCode > 0) condition = "Cloudy";
+                if (weatherCode > 50) condition = "Rainy";
+                if (weatherCode > 70) condition = "Snowy";
+
+                return `${condition}, ${w.temperature}°F`;
+            } catch (err) {
+                console.error("Weather fetch failed:", err);
+                return "Weather Unavailable";
+            }
+        };
+
+        // --- COMPONENTS ---
+
+        // Plan Uploader: Now returns full file dataUrl for storage
+        const PlanUploader = ({ onPlanSelected }) => {
+            const [file, setFile] = useState(null);
+            const [loading, setLoading] = useState(false);
+
+            const handleFileChange = async (e) => {
+                const selectedFile = e.target.files[0];
+                if (!selectedFile) return;
+                setFile(selectedFile);
+                setLoading(true);
+
+                const fileReader = new FileReader();
+
+                if (selectedFile.type === 'application/pdf') {
+                    // 1. Read as ArrayBuffer for PDF.js validation/page count
+                    const bufferReader = new FileReader();
+                    bufferReader.onload = async function () {
+                        try {
+                            const typedarray = new Uint8Array(this.result);
+                            const pdf = await pdfjsLib.getDocument(typedarray).promise;
+
+                            // 2. Read as DataURL for storage (reliable)
+                            const dataUrlReader = new FileReader();
+                            dataUrlReader.onload = (ev) => {
+                                const result = ev.target.result;
+                                if (result.length < 50) {
+                                    alert("Error: PDF Data too short.");
+                                    setLoading(false);
+                                    return;
+                                }
+                                onPlanSelected(result, 'pdf', pdf.numPages);
+                                setLoading(false);
+                            };
+                            dataUrlReader.readAsDataURL(selectedFile);
+                        } catch (err) {
+                            console.error("Error loading PDF", err);
+                            setLoading(false);
+                            alert("Invalid PDF file");
+                        }
+                    };
+                    bufferReader.readAsArrayBuffer(selectedFile);
+                } else {
+                    // It's an image
+                    fileReader.onload = (ev) => {
+                        onPlanSelected(ev.target.result, 'image', 1);
+                        setLoading(false);
+                    };
+                    fileReader.readAsDataURL(selectedFile);
+                }
+            };
+
+            return (
+                <div className="space-y-4">
+                    <label className="block w-full border-2 border-dashed border-gray-300 rounded-xl p-6 text-center cursor-pointer hover:border-black transition-colors bg-gray-50">
+                        <input type="file" accept="image/*,application/pdf" className="hidden" onChange={handleFileChange} />
+                        <div className="flex flex-col items-center justify-center text-gray-500">
+                            <UploadCloud size={32} className="mb-2" />
+                            <span className="text-sm font-medium">{file ? file.name : "Upload Plan (PDF or Image)"}</span>
+                        </div>
+                    </label>
+                    {loading && <div className="text-center text-sm text-gray-500">Processing file...</div>}
+                </div>
+            );
+        };
+
+        // Photo Editor (Canvas)
+        const PhotoEditor = ({ imageSrc, onSave, onCancel }) => {
+            const canvasRef = useRef(null);
+            const [color, setColor] = useState('#ef4444');
+            const [lineWidth, setLineWidth] = useState(4);
+            const [isDrawing, setIsDrawing] = useState(false);
+            const [history, setHistory] = useState([]);
+
+            useEffect(() => {
+                let isMounted = true;
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+
+                const ctx = canvas.getContext('2d');
+                const img = new Image();
+                img.crossOrigin = "anonymous";
+                img.src = imageSrc;
+
+                img.onload = () => {
+                    if (!isMounted) return;
+
+                    const maxWidth = window.innerWidth;
+                    const maxHeight = window.innerHeight * 0.7;
+                    let width = img.width;
+                    let height = img.height;
+
+                    if (width === 0 || height === 0) return;
+
+                    if (width > maxWidth || height > maxHeight) {
+                        const ratio = Math.min(maxWidth / width, maxHeight / height);
+                        width *= ratio;
+                        height *= ratio;
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    setHistory(prev => {
+                        if (prev.length === 0) return [canvas.toDataURL()];
+                        return prev;
+                    });
+                };
+
+                return () => { isMounted = false; };
+            }, [imageSrc]);
+
+            const saveState = () => {
+                const canvas = canvasRef.current;
+                if (canvas) {
+                    setHistory(prev => [...prev.slice(-10), canvas.toDataURL()]);
+                }
+            };
+
+            const startDrawing = (e) => {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                const rect = canvas.getBoundingClientRect();
+                const x = (e.clientX || e.touches[0].clientX) - rect.left;
+                const y = (e.clientY || e.touches[0].clientY) - rect.top;
+
+                const ctx = canvas.getContext('2d');
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                ctx.strokeStyle = color;
+                ctx.lineWidth = lineWidth;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                setIsDrawing(true);
+            };
+
+            const draw = (e) => {
+                if (!isDrawing) return;
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                const rect = canvas.getBoundingClientRect();
+                const x = (e.clientX || e.touches[0].clientX) - rect.left;
+                const y = (e.clientY || e.touches[0].clientY) - rect.top;
+
+                const ctx = canvas.getContext('2d');
+                ctx.lineTo(x, y);
+                ctx.stroke();
+            };
+
+            const stopDrawing = () => {
+                if (isDrawing) {
+                    setIsDrawing(false);
+                    saveState();
+                }
+            };
+
+            const handleUndo = () => {
+                if (history.length <= 1) return;
+                const newHistory = [...history];
+                newHistory.pop();
+                const previousState = newHistory[newHistory.length - 1];
+                setHistory(newHistory);
+
+                const img = new Image();
+                img.src = previousState;
+                img.onload = () => {
+                    const canvas = canvasRef.current;
+                    if (!canvas) return;
+                    const ctx = canvas.getContext('2d');
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0);
+                };
+            };
+
+            const handleSave = () => {
+                if (canvasRef.current) {
+                    onSave(canvasRef.current.toDataURL());
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 z-50 bg-black flex flex-col">
+                    <div className="flex items-center justify-between p-4 bg-gray-900 text-white shrink-0">
+                        <button onClick={onCancel} className="p-2 hover:bg-gray-800 rounded-full"><X size={24} /></button>
+                        <div className="flex space-x-4">
+                            <button onClick={() => setColor('#ef4444')} className={`w-8 h-8 rounded-full border-2 ${color === '#ef4444' ? 'border-white' : 'border-transparent'}`} style={{ backgroundColor: '#ef4444' }} />
+                            <button onClick={() => setColor('#3b82f6')} className={`w-8 h-8 rounded-full border-2 ${color === '#3b82f6' ? 'border-white' : 'border-transparent'}`} style={{ backgroundColor: '#3b82f6' }} />
+                            <button onClick={() => setColor('#eab308')} className={`w-8 h-8 rounded-full border-2 ${color === '#eab308' ? 'border-white' : 'border-transparent'}`} style={{ backgroundColor: '#eab308' }} />
+                        </div>
+                        <div className="flex space-x-2">
+                            <button onClick={handleUndo} className="p-2 hover:bg-gray-800 rounded-full"><Undo size={24} /></button>
+                            <button onClick={handleSave} className="p-2 bg-white text-black rounded-full"><Check size={24} /></button>
+                        </div>
+                    </div>
+                    <div className="flex-1 flex items-center justify-center bg-gray-900 overflow-hidden touch-none">
+                        <canvas
+                            ref={canvasRef}
+                            onMouseDown={startDrawing}
+                            onMouseMove={draw}
+                            onMouseUp={stopDrawing}
+                            onMouseLeave={stopDrawing}
+                            onTouchStart={startDrawing}
+                            onTouchMove={draw}
+                            onTouchEnd={stopDrawing}
+                            className="bg-gray-800 shadow-lg"
+                        />
+                    </div>
+                </div>
+            );
+        };
+
+        // 2. Plan Viewer
+        const PlanViewer = ({ planData, planType, totalPages, currentPage, onPageChange, pins, onAddPin, onSelectPin, selectedPinId, planScale, onUpdateScale }) => {
+            const containerRef = useRef(null);
+            const [scale, setScale] = useState(1);
+            const [offset, setOffset] = useState({ x: 0, y: 0 });
+            const [isDragging, setIsDragging] = useState(false);
+            const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+            const [currentImageUrl, setCurrentImageUrl] = useState(null);
+            const [loading, setLoading] = useState(false);
+
+            // Measurement / Calibration State
+            const [mode, setMode] = useState('view'); // view, calibrate, measure
+            const [p1, setP1] = useState(null);
+            const [p2, setP2] = useState(null);
+            const [tempP2, setTempP2] = useState(null);
+            const [measureResult, setMeasureResult] = useState(null);
+
+            // Effect: Render Page
+            useEffect(() => {
+                if (!planData) return;
+
+                if (planType === 'image') {
+                    setCurrentImageUrl(planData);
+                    return;
+                }
+
+                // Render PDF Page
+                const renderPdfPage = async () => {
+                    setLoading(true);
+                    try {
+                        // Convert base64 to array buffer
+                        const pdfData = atob(planData.split(',')[1]);
+                        const array = new Uint8Array(pdfData.length);
+                        for (let i = 0; i < pdfData.length; i++) array[i] = pdfData.charCodeAt(i);
+
+                        const loadingTask = pdfjsLib.getDocument(array);
+                        const pdf = await loadingTask.promise;
+                        const page = await pdf.getPage(currentPage);
+
+                        const viewport = page.getViewport({ scale: 2.0 }); // Good quality for viewing
+                        const canvas = document.createElement('canvas');
+                        const context = canvas.getContext('2d');
+                        canvas.height = viewport.height;
+                        canvas.width = viewport.width;
+
+                        await page.render({ canvasContext: context, viewport: viewport }).promise;
+                        setCurrentImageUrl(canvas.toDataURL());
+                    } catch (error) {
+                        console.error("PDF Render Error:", error);
+                    }
+                    setLoading(false);
+                };
+
+                renderPdfPage();
+
+                renderPdfPage();
+
+            }, [planData, planType, currentPage]);
+
+            // Reset tools when page changes
+            useEffect(() => {
+                setMode('view'); setP1(null); setP2(null); setTempP2(null); setMeasureResult(null);
+            }, [currentPage, planData]);
+
+
+            const handleMouseDown = (e) => {
+                if (e.target.closest('.pin-marker')) return;
+                setIsDragging(true);
+                setDragStart({ x: e.clientX - offset.x, y: e.clientY - offset.y });
+            };
+
+            const handleMouseMove = (e) => {
+                if (!isDragging) return;
+                e.preventDefault();
+                setOffset({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
+            };
+
+            const handleMouseUp = () => setIsDragging(false);
+            const handleZoom = (delta) => setScale(prev => Math.max(0.5, Math.min(4, prev + delta)));
+
+            const handleImageClick = (e) => {
+                if (isDragging) return;
+                const rect = e.target.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return;
+                const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+                const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+
+                // Calibration / Measurement Logic
+                if (mode === 'calibrate' || mode === 'measure') {
+                    if (!p1) {
+                        setP1({ x: xPct, y: yPct });
+                    } else {
+                        setP2({ x: xPct, y: yPct });
+                        setTempP2(null);
+
+                        // Calculate Pixel Distance
+                        const distPx = Math.sqrt(Math.pow((xPct - p1.x) * rect.width / 100, 2) + Math.pow((yPct - p1.y) * rect.height / 100, 2));
+
+                        if (mode === 'calibrate') {
+                            const userDist = prompt("Enter distance in Feet (e.g. 10):");
+                            if (userDist && !isNaN(userDist)) {
+                                const newScale = distPx / parseFloat(userDist); // Px per Foot
+                                onUpdateScale(newScale);
+                                alert(`Scale Calibrated: ${newScale.toFixed(2)} px/ft`);
+                                setMode('view'); setP1(null); setP2(null);
+                            } else {
+                                setP1(null); setP2(null); // Reset
+                            }
+                        } else {
+                            // Measure
+                            if (planScale) {
+                                const distFt = distPx / planScale;
+                                setMeasureResult(`${distFt.toFixed(2)} ft`);
+                            } else {
+                                alert("Please Calibrate Plan First!");
+                                setMode('view');
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                onAddPin({ x: xPct, y: yPct });
+            };
+
+            const handleMouseMoveImg = (e) => {
+                if (mode !== 'view' && p1 && !p2) {
+                    const rect = e.target.getBoundingClientRect();
+                    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+                    const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+                    setTempP2({ x: xPct, y: yPct });
+                }
+            };
+
+            // Filter pins for this page
+            const visiblePins = pins.filter(p => (p.page || 1) === currentPage);
+
+            return (
+                <div className="relative w-full h-full bg-gray-100 overflow-hidden flex flex-col">
+                    {/* Zoom & Page Controls */}
+                    <div className="absolute bottom-6 right-6 z-10 flex flex-col space-y-2 items-end">
+                        <div className="bg-white rounded-lg shadow-lg p-1 flex items-center space-x-2 mb-2">
+                            {/* Mode Toggle */}
+                            <button onClick={() => { setMode(mode === 'view' ? 'calibrate' : 'view'); setP1(null); setMeasureResult(null); }} className={`p-2 rounded font-bold text-xs ${mode === 'calibrate' ? 'bg-black text-white' : 'hover:bg-gray-100 text-gray-700'}`}>
+                                {mode === 'calibrate' ? 'Cancel' : 'Calibrate'}
+                            </button>
+                            <button onClick={() => { setMode(mode === 'view' ? 'measure' : 'view'); setP1(null); setMeasureResult(null); }} className={`p-2 rounded font-bold text-xs ${mode === 'measure' ? 'bg-black text-white' : 'hover:bg-gray-100 text-gray-700'}`}>
+                                {mode === 'measure' ? 'Done' : 'Measure'}
+                            </button>
+                        </div>
+                        <div className="bg-white rounded-lg shadow-lg p-1 flex items-center space-x-2 mb-2">
+                            <button disabled={currentPage <= 1} onClick={() => onPageChange(currentPage - 1)} className="p-2 hover:bg-gray-100 rounded disabled:opacity-30"><ChevronLeft size={20} /></button>
+                            <span className="text-xs font-bold w-20 text-center">Page {currentPage} / {totalPages}</span>
+                            <button disabled={currentPage >= totalPages} onClick={() => onPageChange(currentPage + 1)} className="p-2 hover:bg-gray-100 rounded disabled:opacity-30"><ChevronRight size={20} /></button>
+                        </div>
+                        <button onClick={() => handleZoom(0.2)} className="p-3 bg-white shadow-lg rounded-full text-gray-700 hover:bg-gray-50"><ZoomIn size={20} /></button>
+                        <button onClick={() => handleZoom(-0.2)} className="p-3 bg-white shadow-lg rounded-full text-gray-700 hover:bg-gray-50"><ZoomOut size={20} /></button>
+                    </div>
+
+                    {measureResult && (
+                        <div className="absolute top-6 left-1/2 transform -translate-x-1/2 z-20 bg-black text-white px-4 py-2 rounded-full shadow-lg font-bold">
+                            Measurement: {measureResult} <button onClick={() => { setMeasureResult(null); setP1(null); setP2(null); }} className="ml-2 opacity-70 hover:opacity-100">x</button>
+                        </div>
+                    )}
+
+                    <div
+                        ref={containerRef}
+                        className={`flex-1 relative touch-none flex items-center justify-center ${mode === 'view' ? 'cursor-move' : 'cursor-crosshair'}`}
+                        onMouseDown={handleMouseDown}
+                        onMouseMove={handleMouseMove}
+                        onMouseUp={handleMouseUp}
+                        onMouseLeave={handleMouseUp}
+                    >
+                        <div
+                            style={{
+                                transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+                                transition: isDragging ? 'none' : 'transform 0.1s ease-out'
+                            }}
+                            className="relative shadow-2xl origin-center"
+                        >
+                            {currentImageUrl ? (
+                                <img
+                                    src={currentImageUrl}
+                                    alt="Floor Plan"
+                                    className="max-w-none pointer-events-auto select-none"
+                                    style={{ width: '1000px' }}
+                                    draggable={false}
+                                    onClick={handleImageClick}
+                                    onMouseMove={handleMouseMoveImg}
+                                />
+                            ) : (
+                                <div style={{ width: 1000, height: 700 }} className="bg-white flex items-center justify-center flex-col">
+                                    {loading ? "Rendering..." : (
+                                        <>
+                                            <div>No Plan Loaded</div>
+                                            {(planData && planData.length < 50) && (
+                                                <div className="text-red-500 font-bold mt-2">
+                                                    Plan data is corrupted (empty). Please delete this plan and re-upload it.
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
+                            {visiblePins.map(pin => {
+                                const isFacade = pin.type === 'Facade';
+                                let IconComponent = Hexagon;
+                                let colorClass = 'text-gray-600 fill-current';
+
+                                if (isFacade) {
+                                    switch (pin.status) {
+                                        case 'Crack': IconComponent = Activity; colorClass = 'text-red-600'; break;
+                                        case 'Spall': IconComponent = Cloud; colorClass = 'text-orange-600'; break;
+                                        case 'Corrosion': IconComponent = AlertTriangle; colorClass = 'text-amber-700'; break;
+                                        case 'Section Loss': IconComponent = Minimize2; colorClass = 'text-yellow-600'; break;
+                                        case 'Missing': IconComponent = Slash; colorClass = 'text-gray-600'; break;
+                                        case 'Embedment': IconComponent = Anchor; colorClass = 'text-blue-600'; break;
+                                        case 'Other': IconComponent = HelpCircle; colorClass = 'text-purple-600'; break;
+                                        default: IconComponent = HelpCircle; colorClass = 'text-gray-600';
+                                    }
+                                } else {
+                                    switch (pin.status) {
+                                        case 'Defect': colorClass = 'text-red-600 fill-current'; break;
+                                        case 'Reference': colorClass = 'text-blue-600 fill-current'; break;
+                                        case 'Discussion': colorClass = 'text-yellow-500 fill-current'; break;
+                                        case 'RFI': colorClass = 'text-orange-500 fill-current'; break;
+                                        case 'Progress': colorClass = 'text-green-600 fill-current'; break;
+                                        default: colorClass = 'text-gray-600 fill-current';
+                                    }
+                                }
+
+                                return (
+                                    <div
+                                        key={pin.id}
+                                        className={`pin-marker absolute transform -translate-x-1/2 -translate-y-1/2 cursor-pointer transition-transform hover:scale-125
+                                        ${selectedPinId === pin.id ? 'z-20 scale-125' : 'z-10'}
+                                    `}
+                                        style={{ left: `${pin.x}%`, top: `${pin.y}%` }}
+                                        onClick={(e) => { e.stopPropagation(); onSelectPin(pin.id); }}
+                                    >
+                                        <div className="relative flex items-center justify-center">
+                                            <IconComponent
+                                                className={`w-10 h-10 drop-shadow-md ${colorClass}`}
+                                                stroke="white"
+                                                strokeWidth={1.5}
+                                            />
+                                            {!isFacade && (
+                                                <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white pointer-events-none">
+                                                    {pin.number}
+                                                </span>
+                                            )}
+                                            {(pin.quantity) && (
+                                                <div className="absolute left-full ml-1 bg-white/90 px-1 rounded shadow text-[10px] font-bold whitespace-nowrap pointer-events-none text-black border border-gray-200">
+                                                    {pin.quantity}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                            {/* SVG Overlay for Lines */}
+                            <svg className="absolute inset-0 pointer-events-none" style={{ width: '100%', height: '100%', zIndex: 15 }} viewBox="0 0 100 100" preserveAspectRatio="none">
+                                {(p1 && tempP2) && (
+                                    <line x1={p1.x} y1={p1.y} x2={tempP2.x} y2={tempP2.y} stroke="red" strokeWidth="0.5" strokeDasharray="1,1" />
+                                )}
+                                {(p1 && p2) && (
+                                    <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="red" strokeWidth="0.5" />
+                                )}
+                            </svg>
+                        </div>
+                    </div>
+                </div >
+            );
+        };
+
+        // 3. Observation Drawer
+        const ObservationDrawer = ({ isOpen, observation, onClose, onChange, onTakePhoto, onRemove, onMarkup }) => {
+            if (!isOpen || !observation) return null;
+
+            const isFacade = observation.type === 'Facade';
+
+            const caStatuses = [
+                { s: 'Defect', c: 'bg-red-100 text-red-800 border-red-200' },
+                { s: 'Reference', c: 'bg-blue-100 text-blue-800 border-blue-200' },
+                { s: 'Discussion', c: 'bg-yellow-100 text-yellow-800 border-yellow-200' },
+                { s: 'RFI', c: 'bg-orange-100 text-orange-800 border-orange-200' },
+                { s: 'Progress', c: 'bg-green-100 text-green-800 border-green-200' }
+            ];
+
+            const facadeStatuses = [
+                { s: 'Crack', c: 'bg-red-50 text-red-600 border-red-200' },
+                { s: 'Spall', c: 'bg-orange-50 text-orange-600 border-orange-200' },
+                { s: 'Corrosion', c: 'bg-amber-50 text-amber-700 border-amber-200' },
+                { s: 'Section Loss', c: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+                { s: 'Missing', c: 'bg-gray-50 text-gray-600 border-gray-200' },
+                { s: 'Embedment', c: 'bg-blue-50 text-blue-600 border-blue-200' },
+                { s: 'Other', c: 'bg-purple-50 text-purple-600 border-purple-200' }
+            ];
+
+            const statuses = isFacade ? facadeStatuses : caStatuses;
+
+            return (
+                <div className="absolute inset-y-0 right-0 w-full md:w-96 bg-white shadow-2xl z-20 transform transition-transform duration-300 ease-in-out flex flex-col">
+                    <div className="h-16 border-b flex items-center justify-between px-6 bg-gray-50 shrink-0">
+                        <h3 className="font-bold text-gray-800">{isFacade ? "Observation" : `Observation #${observation.number}`}</h3>
+                        <button onClick={onClose} className="p-2 hover:bg-gray-200 rounded-full"><X size={20} /></button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                        <div className="text-xs font-bold text-gray-400">On Page {observation.page || 1}</div>
+                        <div>
+                            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Status</label>
+                            <div className="flex flex-wrap gap-2">
+                                {statuses.map(({ s, c }) => (
+                                    <button
+                                        key={s}
+                                        onClick={() => onChange('status', s)}
+                                        className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-all ${observation.status === s ? 'ring-2 ring-black scale-105 ' + c : 'opacity-60 hover:opacity-100 ' + c
+                                            }`}
+                                    >
+                                        {s}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Quantity</label>
+                            <input
+                                type="text"
+                                value={observation.quantity || ''}
+                                onChange={(e) => onChange('quantity', e.target.value)}
+                                placeholder="e.g. 5 SF, 10 LF"
+                                className="w-full text-lg font-medium border-b-2 border-gray-200 focus:border-black outline-none py-2 bg-transparent placeholder-gray-300"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Title</label>
+                            <input
+                                type="text"
+                                value={observation.title}
+                                onChange={(e) => onChange('title', e.target.value)}
+                                placeholder="e.g., Damaged Drywall"
+                                className="w-full text-lg font-medium border-b-2 border-gray-200 focus:border-black outline-none py-2 bg-transparent placeholder-gray-300"
+                            />
+                            <div className="relative mt-2">
+                                <select
+                                    className="w-full p-2 bg-white border rounded-lg text-xs font-semibold text-gray-600 appearance-none cursor-pointer hover:border-black"
+                                    onChange={(e) => {
+                                        if (e.target.value) {
+                                            onChange('title', e.target.value);
+                                            e.target.value = "";
+                                        }
+                                    }}
+                                >
+                                    <option value="">+ Add Common Phrase...</option>
+                                    <option value="Masonry Crack">Masonry Crack</option>
+                                    <option value="Masonry Spall">Masonry Spall</option>
+                                    <option value="Masonry Repoint">Masonry Repoint</option>
+                                    <option value="Concrete Crack">Concrete Crack</option>
+                                    <option value="Concrete Spall">Concrete Spall</option>
+                                    <option value="Exposed Reinforcement">Exposed Reinforcement</option>
+                                    <option value="Steel Section Loss">Steel Section Loss</option>
+                                    <option value="Steel Corroded">Steel Corroded</option>
+                                </select>
+                                <div className="absolute right-3 top-1/2 transform -translate-y-1/2 pointer-events-none">
+                                    <ChevronRight size={14} className="rotate-90 text-gray-400" />
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Visual Evidence</label>
+                            {observation.image ? (
+                                <div className="relative group rounded-xl overflow-hidden shadow-sm border border-gray-100">
+                                    <img src={observation.image} alt="Observation" className="w-full h-48 object-cover" />
+                                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center space-x-4">
+                                        <button onClick={onMarkup} className="p-3 bg-white rounded-full hover:scale-105 transition-transform"><PenTool size={20} className="text-gray-900" /></button>
+                                        <button onClick={() => onChange('image', null)} className="p-3 bg-red-500 text-white rounded-full hover:scale-105 transition-transform"><Trash2 size={20} /></button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <button onClick={onTakePhoto} className="w-full h-32 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center text-gray-400 hover:border-gray-900 hover:text-gray-900 transition-colors">
+                                    <Camera size={24} className="mb-2" /><span className="text-sm font-medium">Add Photo</span>
+                                </button>
+                            )}
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Notes</label>
+                            <textarea
+                                placeholder="Add detailed notes here..."
+                                className="w-full h-32 bg-gray-50 rounded-lg p-4 text-sm focus:ring-2 focus:ring-black outline-none resize-none mb-2"
+                            />
+
+                        </div>
+                        <div className="text-xs text-gray-400 pt-4 border-t">Created: {new Date(observation.createdAt).toLocaleString()}</div>
+                    </div>
+                    <div className="p-4 border-t bg-gray-50 flex justify-between shrink-0">
+                        <button onClick={onRemove} className="text-red-500 text-sm font-medium hover:underline">Delete</button>
+                        <button onClick={onClose} className="bg-black text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-gray-800">Done</button>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- MODALS ---
+        const Modal = ({ isOpen, onClose, title, children }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col">
+                        <div className="flex items-center justify-between p-4 border-b shrink-0">
+                            <h3 className="font-bold text-lg">{title}</h3>
+                            <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-full"><X size={20} /></button>
+                        </div>
+                        <div className="p-4 overflow-y-auto">{children}</div>
+                    </div>
+                </div>
+            );
+        };
+
+        const ReportInfoModal = ({ isOpen, onClose, report, onUpdate }) => {
+            if (!isOpen) return null;
+
+            const [localWeather, setLocalWeather] = useState(report.weather);
+            const [loadingWeather, setLoadingWeather] = useState(false);
+
+            useEffect(() => { setLocalWeather(report.weather); }, [report.weather]);
+
+            const handleGetWeather = async () => {
+                // Must get project address. Since we only have 'report' here, we need to pass address in or find it.
+                // Refactor: Pass address as prop
+            };
+
+            return (
+                <Modal isOpen={isOpen} onClose={onClose} title="Report Details">
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Weather</label>
+                            <div className="flex items-center space-x-2">
+                                <div className="flex-1 flex items-center border rounded-lg px-3 py-2 bg-gray-50">
+                                    <Sun size={18} className="text-gray-400 mr-2" />
+                                    <input className="bg-transparent w-full outline-none text-sm" placeholder="e.g. Sunny, 72F" value={report.weather || ''} onChange={e => onUpdate('weather', e.target.value)} />
+                                </div>
+                                <button onClick={() => onUpdate('get_weather')} className="p-2 bg-blue-50 text-blue-600 rounded-lg text-xs font-bold hover:bg-blue-100">Auto</button>
+                            </div>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Contractors On Site</label>
+                            <div className="flex items-center border rounded-lg px-3 py-2 bg-gray-50">
+                                <Users size={18} className="text-gray-400 mr-2" />
+                                <input className="bg-transparent w-full outline-none text-sm" placeholder="e.g. GC, Electrician" value={report.contractors || ''} onChange={e => onUpdate('contractors', e.target.value)} />
+                            </div>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Work In Progress</label>
+                            <div className="flex items-start border rounded-lg px-3 py-2 bg-gray-50">
+                                <Hammer size={18} className="text-gray-400 mr-2 mt-0.5" />
+                                <textarea className="bg-transparent w-full outline-none text-sm resize-none h-20" placeholder="e.g. Framing on 2nd floor..." value={report.workInProgress || ''} onChange={e => onUpdate('workInProgress', e.target.value)} />
+                            </div>
+                        </div>
+                        <button onClick={onClose} className="w-full bg-black text-white py-2 rounded-lg font-medium hover:bg-gray-800">Save Changes</button>
+                    </div>
+                </Modal>
+            );
+        }
+
+        // --- MAIN APP COMPONENT ---
+        const App = () => {
+            // STATE HIERARCHY: Projects -> Reports -> Observations
+            const [view, setView] = useState('projects_list'); // projects_list | project_detail | report_editor
+            const [observationMode, setObservationMode] = useState('CA'); // 'CA' | 'Facade'
+
+            const [projects, setProjects] = useState([
+                {
+                    id: 'p1',
+                    name: "Skyline Lofts Renovation",
+                    address: "1200 W Lake St, Chicago, IL",
+                    plans: [
+                        { id: 'def', name: 'Main Plan', type: 'image', data: DEMO_PLAN_URL, pages: 1 }
+                    ],
+                    // Legacy support checks handled in render or migration
+                    reports: [
+                        {
+                            id: 'r1',
+                            name: "Site Visit #01",
+                            date: new Date().toISOString(),
+                            author: "Jane Architect",
+                            weather: "Sunny, 68°F",
+                            contractors: "General Contractor, Plumbing",
+                            workInProgress: "Demolition complete. Framing started on East wing.",
+                            observations: [
+                                { id: '1', number: 1, planId: 'def', page: 1, x: 35, y: 42, status: 'Defect', title: 'Cracked Tile', description: 'Tile in the entryway has a hairline crack.', createdAt: new Date().toISOString(), image: null },
+                                { id: '2', number: 2, planId: 'def', page: 1, x: 65, y: 20, status: 'Reference', title: 'Electrical Rough-in', description: 'Checking placement of outlets.', createdAt: new Date().toISOString(), image: null }
+                            ]
+                        }
+                    ]
+                }
+            ]);
+            const [loading, setLoading] = useState(true);
+
+            // Load from DB
+            useEffect(() => {
+                const loadData = async () => {
+                    try {
+                        let projs = await db.projects.toArray();
+                        if (projs.length === 0) {
+                            // Migrate or Init Demo
+                            const demoProj = projects[0];
+                            // Extract Plans for Demo
+                            const demoPlans = demoProj.plans.map(p => ({ ...p, projectId: demoProj.id }));
+                            const demoProjClean = { ...demoProj, plans: [] }; // Don't verify plans in project object anymore
+
+                            await db.projects.add(demoProjClean);
+                            await db.plans.bulkAdd(demoPlans);
+
+                            // Reload fully
+                            projs = [demoProjClean];
+                        }
+
+                        // Attach plans to projects in memory for the app to use
+                        const allPlans = await db.plans.toArray();
+                        const hydratedProjects = projs.map(p => ({
+                            ...p,
+                            plans: allPlans.filter(plan => plan.projectId === p.id)
+                        }));
+
+                        setProjects(hydratedProjects);
+                        setLoading(false);
+                    } catch (e) {
+                        console.error("DB Load Error", e);
+                        setLoading(false);
+                    }
+                };
+                loadData();
+            }, []);
+
+            // Save Helper (updates both state and DB)
+            const saveProjectState = async (newProjects) => {
+                setProjects(newProjects);
+                // For updates to reports/metadata, we just put the project object (minus plans, ideally)
+                // But since we hydrated plans into memory, we need to STRIP plans before saving project to DB
+                // AND save any modified plans if they changed.
+                // Assuming this function is mostly for project metadata/reports updates:
+                const projectToSave = newProjects.find(p => p.id === activeProjectId);
+                if (projectToSave) {
+                    const { plans, ...projectData } = projectToSave;
+                    await db.projects.put(projectData);
+                    // If we edited plan scale/metadata, we should save plans too.
+                    if (plans) {
+                        const plansToSave = plans.map(p => ({ ...p, projectId: projectToSave.id }));
+                        await db.plans.bulkPut(plansToSave);
+                    }
+                }
+            };
+
+            const [activeProjectId, setActiveProjectId] = useState(null);
+            const [activeReportId, setActiveReportId] = useState(null);
+            const [activePlanId, setActivePlanId] = useState(null);
+
+            // UI State
+            const [selectedPinId, setSelectedPinId] = useState(null);
+            const [markupImage, setMarkupImage] = useState(null);
+            const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
+            const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+            const [isInfoModalOpen, setIsInfoModalOpen] = useState(false);
+            // New Plan Modal State
+            const [isAddPlanModalOpen, setIsAddPlanModalOpen] = useState(false);
+
+            // Delete Confirmation State
+            const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+            const [projectToDeleteId, setProjectToDeleteId] = useState(null);
+
+            const [menuOpen, setMenuOpen] = useState(false);
+            const [currentPage, setCurrentPage] = useState(1);
+
+            // New Plan Form State
+            const [newPlanName, setNewPlanName] = useState("");
+            const [newPlanFile, setNewPlanFile] = useState(null); // {data, type, pages}
+
+            // Temporary Form State
+            const [newProjectName, setNewProjectName] = useState("");
+            const [newProjectAddress, setNewProjectAddress] = useState("");
+            const [newProjectPlan, setNewProjectPlan] = useState(DEMO_PLAN_URL);
+            const [newProjectType, setNewProjectType] = useState('image');
+            const [newProjectPages, setNewProjectPages] = useState(1);
+
+            const fileInputRef = useRef(null);
+
+            // Derived State
+            const activeProject = useMemo(() => projects.find(p => p.id === activeProjectId), [projects, activeProjectId]);
+            const activeReport = useMemo(() => activeProject?.reports.find(r => r.id === activeReportId), [activeProject, activeReportId]);
+            const activePlan = useMemo(() => {
+                if (!activeProject) return null;
+                // Fallback for migration
+                if (!activeProject.plans && activeProject.planData) {
+                    return { id: 'legacy', name: 'Original Plan', type: activeProject.planType, data: activeProject.planData, pages: activeProject.totalPages };
+                }
+                if (!activeProject.plans) return null;
+                return activeProject.plans.find(p => p.id === activePlanId) || activeProject.plans[0];
+            }, [activeProject, activePlanId]);
+
+            // Should set activePlanId on report open if not set
+            useEffect(() => {
+                if (activeProject?.plans && !activePlanId) {
+                    setActivePlanId(activeProject.plans[0].id);
+                }
+            }, [activeProject]);
+
+            const activeObservation = useMemo(() => activeReport?.observations.find(o => o.id === selectedPinId), [activeReport, selectedPinId]);
+
+            // --- NAVIGATION ---
+            const goHome = () => { setView('projects_list'); setActiveProjectId(null); setActiveReportId(null); setSelectedPinId(null); };
+            const goToProject = (pid) => { setActiveProjectId(pid); setView('project_detail'); };
+            const openReport = (rid) => {
+                setActiveReportId(rid);
+                setView('report_editor');
+                setCurrentPage(1); // Reset to page 1
+            };
+
+            // --- ACTIONS ---
+            const createProject = async () => {
+                if (!newProjectName.trim()) return;
+                const newProjId = generateId();
+                const newPlanId = generateId();
+
+                const newPlan = { id: newPlanId, projectId: newProjId, name: "Main Plan", type: newProjectType, data: newProjectPlan, pages: newProjectPages };
+
+                const newProj = {
+                    id: newProjId,
+                    name: newProjectName,
+                    address: newProjectAddress || "No Address",
+                    reports: []
+                };
+
+                // Add to state with hydrated plans for immediate use
+                const newProjState = { ...newProj, plans: [newPlan] };
+                const updated = [...projects, newProjState];
+                setProjects(updated);
+
+                // Add to DB (Separate Tables)
+                await db.projects.add(newProj);
+                await db.plans.add(newPlan);
+
+                setNewProjectName("");
+                setNewProjectAddress("");
+                setNewProjectPlan(DEMO_PLAN_URL);
+                setNewProjectType('image');
+                setNewProjectPages(1);
+                setIsProjectModalOpen(false);
+            };
+
+            const addPlanToProject = async () => {
+                if (!newPlanFile || !newPlanName.trim()) return;
+                const newPlan = {
+                    id: generateId(),
+                    projectId: activeProjectId,
+                    name: newPlanName,
+                    type: newPlanFile.type,
+                    data: newPlanFile.data,
+                    pages: newPlanFile.pages
+                };
+
+                // State Update
+                const updatedProj = { ...activeProject, plans: [...(activeProject.plans || []), newPlan] };
+                const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
+                setProjects(updatedList);
+
+                // DB Update
+                await db.plans.add(newPlan);
+
+                setNewPlanName("");
+                setNewPlanFile(null);
+                setIsAddPlanModalOpen(false);
+                setActivePlanId(newPlan.id);
+            };
+
+            const requestDeleteProject = (pid, e) => {
+                if (e) e.stopPropagation();
+                setProjectToDeleteId(pid);
+                setIsDeleteConfirmOpen(true);
+            };
+
+            const executeDeleteProject = async () => {
+                if (!projectToDeleteId) return;
+                const pid = projectToDeleteId;
+
+                // Optimistic UI update
+                const updated = projects.filter(p => p.id !== pid);
+                setProjects(updated);
+
+                try {
+                    // DB Delete Project and its Linked Plans
+                    await db.projects.delete(pid);
+                    const plansToDelete = await db.plans.where('projectId').equals(pid).toArray();
+                    const planIds = plansToDelete.map(p => p.id);
+                    await db.plans.bulkDelete(planIds);
+                } catch (err) {
+                    console.error("Failed to delete project", err);
+                }
+
+                setIsDeleteConfirmOpen(false);
+                setProjectToDeleteId(null);
+            };
+
+            const deleteProject = async () => {
+                if (confirm("Are you sure you want to delete this project?")) {
+                    const pid = activeProjectId;
+                    const updated = projects.filter(p => p.id !== pid);
+                    setProjects(updated);
+
+                    // DB Delete Project and its Linked Plans
+                    await db.projects.delete(pid);
+                    const plansToDelete = await db.plans.where('projectId').equals(pid).toArray();
+                    const planIds = plansToDelete.map(p => p.id);
+                    await db.plans.bulkDelete(planIds);
+
+                    goHome();
+                }
+            };
+
+            const createReport = async () => {
+                const newRep = {
+                    id: generateId(),
+                    name: `Site Visit #${activeProject.reports.length + 1}`,
+                    date: new Date().toISOString(),
+                    author: "Author",
+                    weather: "",
+                    contractors: "",
+                    workInProgress: "",
+                    observations: []
+                };
+                const updatedProj = { ...activeProject, reports: [newRep, ...activeProject.reports] };
+                const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
+                setProjects(updatedList);
+                await db.projects.put(updatedProj);
+                setActiveReportId(newRep.id); // Set active ID first
+                setView('report_editor');
+                setCurrentPage(1); // Reset
+            };
+
+            const deleteReport = async (reportId, e) => {
+                e.stopPropagation();
+                if (confirm("Delete this report?")) {
+                    const updatedProj = {
+                        ...activeProject,
+                        reports: activeProject.reports.filter(r => r.id !== reportId)
+                    };
+                    const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
+                    setProjects(updatedList);
+                    await db.projects.put(updatedProj);
+                }
+            };
+
+            const handleAddPin = ({ x, y }) => {
+                const obsList = activeReport.observations;
+                const newId = generateId();
+                // Number logic: Only increment for CA items or keep separate counters?
+                // Simplest: Increment number regardless of type, but suppress display for Facade.
+                // Or maybe filter obsList by type if we want separate numbering?
+                // User said "The observation number will be suppressed for these item". 
+                // Let's keep a single sequence for simplicity unless requested otherwise.
+                const nextNumber = obsList.length > 0 ? Math.max(...obsList.map(o => o.number)) + 1 : 1;
+
+                const newObs = {
+                    id: newId,
+                    number: nextNumber,
+                    planId: activePlanId || activePlan.id, // Fallback
+                    page: currentPage,
+                    x, y,
+                    type: observationMode, // 'CA' or 'Facade'
+                    status: observationMode === 'Facade' ? 'Crack' : 'In Progress', // Default status
+                    quantity: '', // Default quantity
+                    title: '',
+                    description: '',
+                    createdAt: new Date().toISOString(),
+                    image: null
+                };
+
+                updateReportObservations([...obsList, newObs]);
+                setSelectedPinId(newId);
+            };
+
+            const updateReportObservations = (newObsList) => {
+                const updatedReport = { ...activeReport, observations: newObsList };
+                updateReport(updatedReport);
+            };
+
+            const updateReport = async (updatedReport) => {
+                const updatedProject = {
+                    ...activeProject,
+                    reports: activeProject.reports.map(r => r.id === updatedReport.id ? updatedReport : r)
+                };
+                const updatedList = projects.map(p => p.id === activeProjectId ? updatedProject : p);
+                setProjects(updatedList);
+                await db.projects.put(updatedProject);
+            };
+
+            const updateObservation = (field, value) => {
+                const updatedObsList = activeReport.observations.map(o => o.id === selectedPinId ? { ...o, [field]: value } : o);
+                updateReportObservations(updatedObsList);
+            };
+
+            const updateReportMeta = async (field, value) => {
+                if (field === 'get_weather') {
+                    const weather = await fetchWeather(activeProject.address);
+                    if (weather) updateReport({ ...activeReport, weather });
+                } else {
+                    updateReport({ ...activeReport, [field]: value });
+                }
+            };
+
+            const removeObservation = () => {
+                updateReportObservations(activeReport.observations.filter(o => o.id !== selectedPinId));
+                setSelectedPinId(null);
+            };
+
+            const triggerCamera = () => fileInputRef.current && fileInputRef.current.click();
+            const handlePhotoUpload = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (ev) => updateObservation('image', ev.target.result);
+                    reader.readAsDataURL(file);
+                }
+            };
+            const handleMarkupSave = (newImageData) => {
+                updateObservation('image', newImageData);
+                setMarkupImage(null);
+            };
+
+            // --- EXPORT LOGIC ---
+            // Helper to render specific PDF page to canvas
+            // Helper to render specific PDF page to canvas
+            const generatePageImage = async (plan, pageNum) => {
+                if (!plan) return null;
+
+                if (plan.type === 'image') {
+                    // Just return image wrapped in canvas
+                    return new Promise((resolve) => {
+                        const img = new Image();
+                        img.crossOrigin = "anonymous";
+                        img.src = plan.data;
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            canvas.width = 1200;
+                            const scale = 1200 / img.width;
+                            canvas.height = img.height * scale;
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                            resolve({ canvas, width: canvas.width, height: canvas.height });
+                        }
+                        img.onerror = () => resolve(null);
+                    });
+                }
+
+                // Render PDF
+                try {
+                    const pdfData = atob(plan.data.split(',')[1]);
+                    const array = new Uint8Array(pdfData.length);
+                    for (let i = 0; i < pdfData.length; i++) array[i] = pdfData.charCodeAt(i);
+
+                    const loadingTask = pdfjsLib.getDocument(array);
+                    const pdf = await loadingTask.promise;
+                    const page = await pdf.getPage(pageNum);
+                    const viewport = page.getViewport({ scale: 2.0 });
+                    const canvas = document.createElement('canvas');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+                    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+                    return { canvas, width: canvas.width, height: canvas.height };
+                } catch (e) {
+                    console.error("Error generating PDF page image", e);
+                    return null;
+                }
+            };
+
+            const generatePlanWithPinsImage = async (plan, pageNum) => {
+                const pageData = await generatePageImage(plan, pageNum);
+                if (!pageData) return null;
+
+                const { canvas, width, height } = pageData;
+                const ctx = canvas.getContext('2d');
+
+                // Draw Pins for this plan and page
+                const pins = activeReport.observations.filter(o => {
+                    // Determine which plan this observation belongs to
+                    // If o.planId is present, use it. If not, assume default plan (first plan or legacy).
+                    const obsPlanId = o.planId;
+
+                    let isMatch = false;
+                    if (obsPlanId) {
+                        isMatch = (obsPlanId === plan.id);
+                    } else {
+                        // Fallback logic for legacy observations:
+                        // If we are currently processing the "legacy" plan or the first plan, treat undefined obsPlanId as a match
+                        const isFirstOrLegacy = plan.id === 'legacy' || (activeProject.plans && activeProject.plans.length > 0 && activeProject.plans[0].id === plan.id);
+                        isMatch = isFirstOrLegacy;
+                    }
+
+                    return isMatch && (o.page || 1) === pageNum;
+                });
+
+                pins.forEach(pin => {
+                    const px = (pin.x / 100) * width;
+                    const py = (pin.y / 100) * height;
+                    const isFacade = pin.type === 'Facade';
+
+                    if (!isFacade) {
+                        // CA: Circle with Number
+                        ctx.beginPath();
+                        ctx.arc(px, py, 20, 0, 2 * Math.PI); // Larger for export
+
+                        const colors = {
+                            'Defect': '#dc2626',
+                            'Reference': '#2563eb',
+                            'Discussion': '#eab308',
+                            'RFI': '#f97316',
+                            'Progress': '#16a34a'
+                        };
+
+                        ctx.fillStyle = colors[pin.status] || '#4b5563';
+                        ctx.fill();
+                        ctx.lineWidth = 3;
+                        ctx.strokeStyle = '#ffffff';
+                        ctx.stroke();
+
+                        // Number
+                        ctx.fillStyle = 'white';
+                        ctx.font = 'bold 18px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(pin.number, px, py);
+                    } else {
+                        // Facade: Specific Icons
+                        ctx.save();
+                        ctx.translate(px, py);
+                        const s = 1.6; // Scale 24px -> 40px
+                        ctx.scale(s, s);
+                        ctx.translate(-12, -12); // Center 24px icon
+
+                        const fColors = {
+                            'Crack': '#dc2626',
+                            'Spall': '#ea580c',
+                            'Corrosion': '#b45309',
+                            'Section Loss': '#ca8a04',
+                            'Missing': '#4b5563',
+                            'Embedment': '#2563eb',
+                            'Other': '#9333ea'
+                        };
+                        ctx.strokeStyle = fColors[pin.status] || '#4b5563';
+                        ctx.lineWidth = 2;
+                        ctx.lineCap = 'round';
+                        ctx.lineJoin = 'round';
+
+                        // Draw Paths
+                        const status = pin.status;
+                        ctx.beginPath();
+                        if (status === 'Crack') { // Activity
+                            ctx.moveTo(22, 12); ctx.lineTo(18, 12); ctx.lineTo(15, 21); ctx.lineTo(9, 3); ctx.lineTo(6, 12); ctx.lineTo(2, 12);
+                            ctx.stroke();
+                        } else if (status === 'Spall') { // Cloud
+                            const p = new Path2D("M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z");
+                            ctx.stroke(p);
+                        } else if (status === 'Corrosion') { // AlertTriangle
+                            const p = new Path2D("M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z");
+                            ctx.stroke(p);
+                            ctx.beginPath(); ctx.moveTo(12, 9); ctx.lineTo(12, 13); ctx.moveTo(12, 17); ctx.lineTo(12.01, 17);
+                            ctx.stroke();
+                        } else if (status === 'Section Loss') { // Minimize2
+                            ctx.moveTo(4, 14); ctx.lineTo(10, 14); ctx.lineTo(10, 20);
+                            ctx.moveTo(20, 10); ctx.lineTo(14, 10); ctx.lineTo(14, 4);
+                            ctx.moveTo(14, 10); ctx.lineTo(21, 3);
+                            ctx.moveTo(3, 21); ctx.lineTo(10, 14);
+                            ctx.stroke();
+                        } else if (status === 'Missing') { // Slash
+                            ctx.arc(12, 12, 10, 0, 2 * Math.PI);
+                            ctx.stroke();
+                            ctx.beginPath(); ctx.moveTo(4.93, 4.93); ctx.lineTo(19.07, 19.07);
+                            ctx.stroke();
+                        } else if (status === 'Embedment') { // Anchor
+                            ctx.arc(12, 5, 3, 0, 2 * Math.PI);
+                            ctx.stroke();
+                            ctx.beginPath(); ctx.moveTo(12, 22); ctx.lineTo(12, 8); ctx.stroke();
+                            const p = new Path2D("M5 12H2a10 10 0 0 0 20 0h-3");
+                            ctx.stroke(p);
+                        } else { // Other / HelpCircle
+                            ctx.arc(12, 12, 10, 0, 2 * Math.PI);
+                            ctx.stroke();
+                            const p = new Path2D("M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3");
+                            ctx.stroke(p);
+                            ctx.beginPath(); ctx.moveTo(12, 17); ctx.lineTo(12.01, 17);
+                            ctx.stroke();
+                        }
+                        ctx.restore();
+
+                        // Quantity
+                        if (pin.quantity) {
+                            ctx.font = 'bold 16px Arial';
+                            ctx.fillStyle = 'rgba(255,255,255,0.9)';
+                            const textWidth = ctx.measureText(pin.quantity).width;
+                            const textH = 20;
+                            const labelX = px + 22;
+                            const labelY = py - 10;
+
+                            ctx.fillRect(labelX, labelY, textWidth + 6, textH);
+                            ctx.lineWidth = 1;
+                            ctx.strokeStyle = '#ccc';
+                            ctx.strokeRect(labelX, labelY, textWidth + 6, textH);
+
+                            ctx.fillStyle = 'black';
+                            ctx.textAlign = 'left';
+                            ctx.textBaseline = 'top';
+                            ctx.fillText(pin.quantity, labelX + 3, labelY + 2);
+                        }
+                    }
+                });
+
+                return canvas.toDataURL('image/jpeg', 0.85);
+            };
+
+            const exportImages = async () => {
+                const zip = new JSZip();
+                const folder = zip.folder(`Images_${activeReport.name.replace(/[^a-z0-9]/gi, '_')}`);
+
+                let count = 0;
+
+                // Helper to get blob from dataURL
+                const dataURLtoBlob = (dataurl) => {
+                    const arr = dataurl.split(',');
+                    const mime = arr[0].match(/:(.*?);/)[1];
+                    const bstr = atob(arr[1]);
+                    let n = bstr.length;
+                    const u8arr = new Uint8Array(n);
+                    while (n--) u8arr[n] = bstr.charCodeAt(n);
+                    return new Blob([u8arr], { type: mime });
+                };
+
+                activeReport.observations.forEach(obs => {
+                    if (obs.image) {
+                        try {
+                            const dateStr = new Date(obs.createdAt).toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
+                            const filename = `${dateStr}_Item${obs.number}.jpg`;
+                            const blob = dataURLtoBlob(obs.image);
+                            folder.file(filename, blob);
+                            count++;
+                        } catch (e) { console.error("Error processing image", e); }
+                    }
+                });
+
+                if (count === 0) {
+                    alert("No images to export in this report.");
+                    return;
+                }
+
+                const content = await zip.generateAsync({ type: "blob" });
+                saveAs(content, `${activeProject.name}_Images.zip`);
+            };
+
+            const exportToWord = async () => {
+                // Find all unique plan/page combinations that have pins
+                const uniquePages = [];
+                const processed = new Set();
+
+                // If no observations, try to export at least the active plan page 1
+                if (activeReport.observations.length === 0) {
+                    if (activePlan) uniquePages.push({ planId: activePlan.id, page: 1 });
+                    else if (activeProject.plans && activeProject.plans.length > 0) uniquePages.push({ planId: activeProject.plans[0].id, page: 1 });
+                } else {
+                    activeReport.observations.forEach(o => {
+                        const pid = o.planId || (activeProject.plans && activeProject.plans[0] ? activeProject.plans[0].id : 'legacy');
+                        const pg = o.page || 1;
+                        const key = `${pid}-${pg}`;
+                        if (!processed.has(key)) {
+                            processed.add(key);
+                            uniquePages.push({ planId: pid, page: pg });
+                        }
+                    });
+                }
+
+                // Sort pages
+                uniquePages.sort((a, b) => {
+                    if (a.planId !== b.planId) return (a.planId || '').localeCompare(b.planId || '');
+                    return a.page - b.page;
+                });
+
+                // Generate Plan Images
+                const planImages = [];
+                for (const item of uniquePages) {
+                    // Find the plan object
+                    let plan = activeProject.plans ? activeProject.plans.find(p => p.id === item.planId) : null;
+
+                    // Fallback for legacy
+                    if (!plan && activeProject.planData) {
+                        // Construct a temporary plan object from legacy project fields
+                        plan = {
+                            id: 'legacy',
+                            type: activeProject.planType,
+                            data: activeProject.planData,
+                            pages: activeProject.totalPages || 1,
+                            name: 'Original Plan'
+                        };
+                    }
+
+                    if (plan) {
+                        const img = await generatePlanWithPinsImage(plan, item.page);
+                        if (img) planImages.push({ page: item.page, planName: plan.name, img });
+                    }
+                }
+
+                const htmlContent = `
+                    <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+                    <head><meta charset="utf-8"><title>Site Visit Report</title>
+                    <style>
+                        body { font-family: 'Arial', sans-serif; padding: 40px; }
+                        h1 { color: #000; font-size: 24pt; border-bottom: 2px solid #000; padding-bottom: 10px; }
+                        h2 { color: #333; font-size: 16pt; margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+                        .meta-table { width: 100%; margin-bottom: 30px; border-collapse: collapse; }
+                        .meta-table td { padding: 5px 10px; border: 1px solid #ddd; }
+                        .label { font-weight: bold; background: #f9f9f9; width: 150px; }
+                        
+                        /* Observation Table Style */
+                        .obs-container { margin-bottom: 30px; page-break-inside: avoid; border: 1px solid #000; }
+                        .obs-header { background: #000; color: #fff; padding: 10px; font-weight: bold; font-size: 14pt; }
+                        .obs-content { display: table; width: 100%; table-layout: fixed; }
+                        .obs-text { display: table-cell; width: 50%; padding: 15px; vertical-align: top; background: #f9f9f9; }
+                        .obs-image-cell { display: table-cell; width: 50%; padding: 15px; vertical-align: middle; text-align: center; background: #fff; border-left: 1px solid #ddd; }
+                        .obs-img { max-width: 300px; max-height: 250px; width: auto; height: auto; border: 1px solid #eee; }
+                        .status-badge { display: inline-block; padding: 4px 8px; border-radius: 4px; background: #eee; font-weight: bold; font-size: 10pt; margin-bottom: 10px; }
+                        
+                        .plan-container { text-align: center; margin-top: 40px; page-break-before: always; }
+                        .plan-img { max-width: 600px; width: 100%; height: auto; border: 1px solid #ccc; margin-bottom: 20px; }
+                        .plan-label { font-weight: bold; font-size: 12pt; margin-bottom: 10px; display: block; }
+                    </style></head><body>
+                    
+                    <h1>Field Observation Report</h1>
+                    
+                    <table class="meta-table">
+                        <tr><td class="label">Project</td><td>${activeProject.name}</td></tr>
+                        <tr><td class="label">Report</td><td>${activeReport.name}</td></tr>
+                        <tr><td class="label">Date</td><td>${formatDate(activeReport.date)}</td></tr>
+                        <tr><td class="label">Author</td><td>${activeReport.author}</td></tr>
+                        <tr><td class="label">Weather</td><td>${activeReport.weather || 'Not Recorded'}</td></tr>
+                        <tr><td class="label">Contractors</td><td>${activeReport.contractors || 'None Listed'}</td></tr>
+                        <tr><td class="label">Work in Progress</td><td>${activeReport.workInProgress || 'Not Recorded'}</td></tr>
+                    </table>
+
+                    <h2>Observations</h2>
+                    ${activeReport.observations.map(obs => `
+                        <div class="obs-container">
+                            <div class="obs-header">Observation #${obs.number}</div>
+                            <div class="obs-content">
+                                <div class="obs-text">
+                                    <div class="status-badge" style="background:${obs.status === 'Defect' ? '#fee2e2' :
+                        obs.status === 'Reference' ? '#dbeafe' :
+                            obs.status === 'Discussion' ? '#fef9c3' :
+                                obs.status === 'RFI' ? '#ffedd5' :
+                                    obs.status === 'Progress' ? '#dcfce7' : '#f3f4f6'
+                    }; color:${obs.status === 'Defect' ? '#991b1b' :
+                        obs.status === 'Reference' ? '#1e40af' :
+                            obs.status === 'Discussion' ? '#854d0e' :
+                                obs.status === 'RFI' ? '#9a3412' :
+                                    obs.status === 'Progress' ? '#166534' : '#374151'
+                    }">
+                                        ${obs.status}
+                                    </div>
+                                    <h3>${obs.title || '(No Title)'}</h3>
+                                    <p><strong>Page:</strong> ${obs.page || 1}</p>
+                                    <p>${obs.description || 'No notes added.'}</p>
+                                </div>
+                                <div class="obs-image-cell">
+                                    ${obs.image ? `<img src="${obs.image}" class="obs-img" />` : '<p style="color:#aaa">No photo</p>'}
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+
+                    <div class="plan-container">
+                        <h2>Reference Plans</h2>
+                        ${planImages.map(p => `
+                            <div>
+                                <span class="plan-label">${p.planName || 'Plan'} - Page ${p.page}</span>
+                                <img src="${p.img}" class="plan-img" />
+                            </div>
+                        `).join('')}
+                    </div>
+
+                    </body></html>`;
+
+                const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = `${activeProject.name}_Report.doc`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+
+
+            // --- RENDER VIEWS ---
+
+            // VIEW 1: PROJECTS LIST
+            if (view === 'projects_list') {
+                return (
+                    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans">
+                        <header className="bg-white border-b px-6 py-4 flex items-center justify-between sticky top-0 z-10">
+                            <div className="flex items-center space-x-2">
+                                <div className="w-8 h-8 bg-black rounded flex items-center justify-center"><div className="w-4 h-4 border-2 border-white rounded-full"></div></div>
+                                <h1 className="text-xl font-bold tracking-tight">SiteLens</h1>
+                            </div>
+                        </header>
+                        <main className="max-w-3xl mx-auto p-6">
+                            <div className="flex items-center justify-between mb-8">
+                                <h2 className="text-2xl font-bold">Projects</h2>
+                                <button onClick={() => setIsProjectModalOpen(true)} className="flex items-center space-x-2 bg-black text-white px-4 py-2 rounded-lg hover:bg-gray-800 transition-colors"><Plus size={18} /><span>New Project</span></button>
+                            </div>
+                            <div className="grid gap-6">
+                                {projects.map(p => (
+                                    <div key={p.id} onClick={() => goToProject(p.id)} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden hover:shadow-md transition-shadow cursor-pointer group relative">
+                                        <div className="absolute top-3 right-3 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <button
+                                                onClick={(e) => requestDeleteProject(p.id, e)}
+                                                className="p-2 bg-white text-red-500 rounded-full shadow-md hover:bg-red-50 transition-colors"
+                                                title="Delete Project"
+                                            >
+                                                <Trash2 size={18} />
+                                            </button>
+                                        </div>
+                                        <div className="h-32 bg-gray-200 relative overflow-hidden">
+                                            <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent flex items-end p-6">
+                                                <div className="text-white">
+                                                    <h3 className="font-bold text-xl">{p.name}</h3>
+                                                    <p className="text-sm opacity-90">{p.address} • {p.plans ? p.plans.length : 1} Plans</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div className="p-4 flex items-center justify-between bg-white">
+                                            <span className="text-sm text-gray-500 font-medium">{p.reports.length} Reports</span>
+                                            <span className="text-blue-600 text-sm font-bold">View Details &rarr;</span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </main>
+                        <Modal isOpen={isProjectModalOpen} onClose={() => setIsProjectModalOpen(false)} title="Create New Project">
+                            <div className="space-y-4">
+                                <input autoFocus className="w-full border p-3 rounded-xl outline-none focus:border-black" placeholder="Project Name" value={newProjectName} onChange={e => setNewProjectName(e.target.value)} />
+                                <input className="w-full border p-3 rounded-xl outline-none focus:border-black" placeholder="Project Address (for Weather)" value={newProjectAddress} onChange={e => setNewProjectAddress(e.target.value)} />
+                                <PlanUploader onPlanSelected={(data, type, pages) => {
+                                    setNewProjectPlan(data);
+                                    setNewProjectType(type);
+                                    setNewProjectPages(pages);
+                                }} />
+                                <button onClick={createProject} className="w-full bg-black text-white py-3 rounded-xl font-bold hover:bg-gray-800 transition-colors">Create Project</button>
+                            </div>
+                        </Modal>
+
+                        <Modal isOpen={isDeleteConfirmOpen} onClose={() => setIsDeleteConfirmOpen(false)} title="Delete Project">
+                            <div className="space-y-4">
+                                <p className="text-gray-600">Are you sure you want to delete this project? This action cannot be undone.</p>
+                                <div className="flex space-x-3">
+                                    <button onClick={() => setIsDeleteConfirmOpen(false)} className="flex-1 py-3 rounded-xl border font-bold hover:bg-gray-50">Cancel</button>
+                                    <button onClick={executeDeleteProject} className="flex-1 py-3 rounded-xl bg-red-600 text-white font-bold hover:bg-red-700 transition-colors">Delete</button>
+                                </div>
+                            </div>
+                        </Modal>
+                    </div>
+                );
+            }
+
+            // VIEW 2: PROJECT DETAILS (REPORT LIST)
+            if (view === 'project_detail') {
+                if (!activeProject) return <div className="p-10 text-center">Loading Project...</div>;
+
+                return (
+                    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans">
+                        <header className="bg-white border-b px-4 py-3 flex items-center justify-between sticky top-0 z-10">
+                            <div className="flex items-center space-x-3">
+                                <button onClick={goHome} className="p-2 hover:bg-gray-100 rounded-lg"><ChevronLeft size={24} /></button>
+                                <h1 className="font-bold text-lg">{activeProject.name}</h1>
+                            </div>
+                            <div className="relative">
+                                <button onClick={() => setMenuOpen(!menuOpen)} className="p-2 hover:bg-gray-100 rounded-full"><MoreVertical size={20} /></button>
+                                {menuOpen && (
+                                    <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-xl border py-1 z-50">
+                                        <button onClick={deleteProject} className="w-full text-left px-4 py-2 text-red-600 hover:bg-red-50 text-sm">Delete Project</button>
+                                    </div>
+                                )}
+                            </div>
+                        </header>
+                        <main className="max-w-3xl mx-auto p-6">
+                            <div className="flex items-center justify-between mb-6">
+                                <h2 className="text-xl font-bold">Field Reports</h2>
+                                <button onClick={createReport} className="flex items-center space-x-2 bg-black text-white px-4 py-2 rounded-lg hover:bg-gray-800"><Plus size={18} /><span>New Report</span></button>
+                            </div>
+                            <div className="space-y-4">
+                            </div>
+                            <div className="space-y-4">
+                                {(activeProject.reports || []).map(r => (
+                                    <div key={r.id} onClick={() => openReport(r.id)} className="bg-white p-4 rounded-xl border border-gray-200 hover:border-black cursor-pointer transition-colors flex items-center justify-between">
+                                        <div className="flex items-center space-x-4">
+                                            <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center text-gray-600"><FileText size={20} /></div>
+                                            <div>
+                                                <h3 className="font-bold">{r.name}</h3>
+                                                <p className="text-xs text-gray-500">{formatDate(r.date)} • {r.observations.length} Observations</p>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center space-x-2">
+                                            <button onClick={(e) => deleteReport(r.id, e)} className="p-2 hover:bg-red-50 text-gray-400 hover:text-red-600 rounded-full transition-colors"><Trash2 size={18} /></button>
+                                            <ChevronLeft size={20} className="rotate-180 text-gray-400" />
+                                        </div>
+                                    </div>
+                                ))}
+                                {(!activeProject.reports || activeProject.reports.length === 0) && (
+                                    <div className="text-center py-10 text-gray-400 border-2 border-dashed rounded-xl">No reports yet. Start one!</div>
+                                )}
+                            </div>
+                        </main>
+                    </div>
+                );
+            }
+
+            // VIEW 3: REPORT EDITOR (MAP)
+            return (
+                <div className="h-screen flex flex-col bg-white overflow-hidden">
+                    <input type="file" accept="image/*" capture="environment" ref={fileInputRef} onChange={handlePhotoUpload} className="hidden" />
+                    {markupImage && <PhotoEditor imageSrc={markupImage} onSave={handleMarkupSave} onCancel={() => setMarkupImage(null)} />}
+                    <ReportInfoModal isOpen={isInfoModalOpen} onClose={() => setIsInfoModalOpen(false)} report={activeReport} onUpdate={updateReportMeta} />
+
+                    <Modal isOpen={isAddPlanModalOpen} onClose={() => setIsAddPlanModalOpen(false)} title="Add Plan to Project">
+                        <div className="space-y-4">
+                            <input autoFocus className="w-full border p-3 rounded-xl outline-none focus:border-black" placeholder="Plan Name" value={newPlanName} onChange={e => setNewPlanName(e.target.value)} />
+                            <PlanUploader onPlanSelected={(data, type, pages) => {
+                                setNewPlanFile({ data, type, pages });
+                            }} />
+                            <button onClick={addPlanToProject} className="w-full bg-black text-white py-3 rounded-xl font-bold hover:bg-gray-800 transition-colors">Add Plan</button>
+                        </div>
+                    </Modal>
+
+                    <header className="h-16 border-b flex items-center justify-between px-4 bg-white z-20 shadow-sm shrink-0">
+                        <div className="flex items-center space-x-3">
+                            <button onClick={() => {
+                                // Save on exit
+                                updateReport(activeReport); // Just to be sure
+                                setView('project_detail');
+                            }} className="p-2 hover:bg-gray-100 rounded-lg text-gray-600"><ChevronLeft size={24} /></button>
+                            <div className="flex flex-col">
+                                <h1 className="font-bold leading-tight truncate max-w-[150px] md:max-w-xs">{activeReport.name}</h1>
+
+                                {/* Plan Selector */}
+                                <div className="flex items-center space-x-1">
+                                    <select
+                                        className="text-xs text-gray-500 bg-transparent outline-none cursor-pointer hover:underline max-w-[150px]"
+                                        value={activePlanId || ''}
+                                        onChange={(e) => {
+                                            if (e.target.value === 'add_new') {
+                                                setIsAddPlanModalOpen(true);
+                                            } else {
+                                                setActivePlanId(e.target.value);
+                                                setCurrentPage(1);
+                                            }
+                                        }}
+                                    >
+                                        {(activeProject.plans || []).map(p => (
+                                            <option key={p.id} value={p.id}>{p.name}</option>
+                                        ))}
+                                        <option value="add_new">+ Add Plan...</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Mode Toggle */}
+                        <div className="flex items-center bg-gray-100 p-1 rounded-lg mx-4">
+                            <button
+                                onClick={() => setObservationMode('CA')}
+                                className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${observationMode === 'CA' ? 'bg-white shadow text-black' : 'text-gray-500 hover:text-gray-900'}`}
+                            >
+                                CA
+                            </button>
+                            <button
+                                onClick={() => setObservationMode('Facade')}
+                                className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${observationMode === 'Facade' ? 'bg-white shadow text-black' : 'text-gray-500 hover:text-gray-900'}`}
+                            >
+                                Facade
+                            </button>
+                        </div>
+
+                        <div className="flex items-center space-x-2">
+                            <button onClick={() => setIsInfoModalOpen(true)} className="p-2 hover:bg-gray-100 rounded-full text-gray-600"><Info size={20} title="Report Details / Set Weather" /></button>
+                            <button onClick={exportImages} className="p-2 hover:bg-gray-100 rounded-full text-gray-600"><Camera size={20} title="Export Images" /></button>
+                            <button onClick={exportToWord} className="flex items-center space-x-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-900 rounded-lg text-sm font-medium transition-colors"><Download size={18} /><span className="hidden sm:inline">Export Doc</span></button>
+                        </div>
+                    </header>
+                    <div className="flex-1 relative overflow-hidden">
+                        {activePlan ? (
+                            <PlanViewer
+                                planData={activePlan.data}
+                                planType={activePlan.type}
+                                totalPages={activePlan.pages || 1}
+                                currentPage={currentPage}
+                                onPageChange={setCurrentPage}
+                                pins={activeReport.observations.filter(p => !p.planId || p.planId === activePlanId)}
+                                onAddPin={handleAddPin}
+                                onSelectPin={setSelectedPinId}
+                                selectedPinId={selectedPinId}
+                                planScale={activePlan.scale}
+                                onUpdateScale={async (newScale) => {
+                                    const updatedPlan = { ...activePlan, scale: newScale };
+                                    const updatedProj = {
+                                        ...activeProject,
+                                        plans: activeProject.plans.map(p => p.id === activePlan.id ? updatedPlan : p)
+                                    };
+                                    // Update state and DB (Plan only)
+                                    const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
+                                    setProjects(updatedList);
+                                    await db.plans.put({ ...updatedPlan, projectId: activeProjectId });
+                                }}
+                            />
+                        ) : (
+                            <div className="flex items-center justify-center h-full text-gray-400">No Plan Selected</div>
+                        )}
+                        <ObservationDrawer isOpen={!!selectedPinId} observation={activeObservation} onClose={() => setSelectedPinId(null)} onChange={updateObservation} onTakePhoto={triggerCamera} onRemove={removeObservation} onMarkup={() => activeObservation.image && setMarkupImage(activeObservation.image)} />
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+
+</html>
