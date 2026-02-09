@@ -120,9 +120,10 @@
 
         // --- DATABASE ---
         const db = new Dexie('SiteVisitsDB');
-        db.version(2).stores({
+        db.version(3).stores({
             projects: 'id, name',
-            plans: 'id, projectId'
+            plans: 'id, projectId',
+            planPages: '[planId+pageIndex], planId' // Compound index for efficient page retrieval
         });
 
         // --- API HELPERS ---
@@ -165,7 +166,7 @@
                 const selectedFile = e.target.files[0];
                 if (!selectedFile) return;
 
-                // Safety Check: Reject HTML/JS files masquerading as something else or if user selected wrong file type
+                // Safety Check
                 if (selectedFile.name.toLowerCase().endsWith('.html') || selectedFile.name.toLowerCase().endsWith('.js')) {
                     alert("Invalid file type.");
                     return;
@@ -174,6 +175,13 @@
                 setFile(selectedFile);
                 setLoading(true);
 
+                // Initialize a new plan record immediately
+                const newPlanId = generateId();
+
+                // We MUST save to DB here.
+                // Let's generate a specific ID here.
+                const tempPlanId = generateId();
+
                 if (selectedFile.type === 'application/pdf') {
                     const bufferReader = new FileReader();
                     bufferReader.onload = async function () {
@@ -181,20 +189,18 @@
                             const typedarray = new Uint8Array(this.result);
                             const pdf = await pdfjsLib.getDocument(typedarray).promise;
                             const numPages = pdf.numPages;
-                            const pageImages = [];
+
 
                             for (let i = 1; i <= numPages; i++) {
                                 const page = await pdf.getPage(i);
                                 let viewport = page.getViewport({ scale: 1.0 });
 
-                                // Scale logic: Max width 2400px (Reduced from 3400px for safety)
+                                // Scale logic: Max width 2400px
                                 const MAX_WIDTH = 2400;
                                 let scale = 1.0;
                                 if (viewport.width > MAX_WIDTH) {
                                     scale = MAX_WIDTH / viewport.width;
                                 } else {
-                                    // Upscale small documents to ensure quality if they are vector based
-                                    // Target at least 1500px width
                                     if (viewport.width < 1500) {
                                         scale = 1500 / viewport.width;
                                     }
@@ -207,27 +213,35 @@
                                 canvas.height = viewport.height;
                                 const ctx = canvas.getContext('2d');
 
-                                // Render
                                 await page.render({ canvasContext: ctx, viewport }).promise;
 
-                                // Greyscale Conversion
+                                // Greyscale
                                 const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
                                 const data = imgData.data;
                                 for (let j = 0; j < data.length; j += 4) {
-                                    const avg = (data[j] * 0.299 + data[j + 1] * 0.587 + data[j + 2] * 0.114); // Luminance
+                                    const avg = (data[j] * 0.299 + data[j + 1] * 0.587 + data[j + 2] * 0.114);
                                     data[j] = avg;
                                     data[j + 1] = avg;
                                     data[j + 2] = avg;
                                 }
                                 ctx.putImageData(imgData, 0, 0);
 
-                                // Compress
                                 const imgUrl = canvas.toDataURL('image/jpeg', 0.8);
-                                pageImages.push(imgUrl);
+
+                                // SAVE IMMEDIATELY TO DB
+                                await db.planPages.put({
+                                    planId: tempPlanId,
+                                    pageIndex: i - 1, // 0-indexed
+                                    data: imgUrl
+                                });
+
+                                // Free memory
+                                canvas.width = 0;
+                                canvas.height = 0;
                             }
 
-                            // data is now Array of Strings (DataURLs) for 'raster_pdf'
-                            onPlanSelected(pageImages, 'raster_pdf', numPages);
+                            // Return special object to parent
+                            onPlanSelected({ dbPlanId: tempPlanId }, 'raster_pdf_db', numPages);
                             setLoading(false);
 
                         } catch (err) {
@@ -409,7 +423,7 @@
         };
 
         // 2. Plan Viewer
-        const PlanViewer = ({ planData, planType, totalPages, currentPage, onPageChange, pins, onAddPin, onSelectPin, selectedPinId, planScale, onUpdateScale, pinScale }) => {
+        const PlanViewer = ({ planId, planType, totalPages, currentPage, onPageChange, pins, onAddPin, onSelectPin, selectedPinId, planScale, onUpdateScale, pinScale }) => {
             const containerRef = useRef(null);
             const clickStartRef = useRef({ x: 0, y: 0 });
 
@@ -427,26 +441,39 @@
             const [tempP2, setTempP2] = useState(null);
             const [measureResult, setMeasureResult] = useState(null);
 
-            // Determine current image source
-            const currentImageSrc = useMemo(() => {
-                if (Array.isArray(planData)) {
-                    // raster_pdf or multi-page image
-                    return planData[currentPage - 1];
-                } else {
-                    // single image
-                    return planData;
-                }
-            }, [planData, currentPage]);
+            // Determine current image source - ASYNC FETCH FROM DB
+            const [currentImageSrc, setCurrentImageSrc] = useState(null);
+            const [pageLoading, setPageLoading] = useState(false);
 
+            useEffect(() => {
+                const fetchPage = async () => {
+                    if (!planId) return;
+                    setPageLoading(true);
+                    setCurrentImageSrc(null);
+                    try {
+                        // Fetch from DB
+                        const index = (planType === 'image') ? 0 : (currentPage - 1);
+                        const pageRec = await db.planPages.get({ planId: planId, pageIndex: index });
+
+                        if (pageRec) {
+                            setCurrentImageSrc(pageRec.data);
+                        } else {
+                            // No page record found
+                        }
+                    } catch (e) {
+                        console.error("Failed to load page image", e);
+                    }
+                    setPageLoading(false);
+                };
+                fetchPage();
+            }, [planId, currentPage, planType]);
+
+
+            // Reset tools when page changes
             // Reset tools when page changes
             useEffect(() => {
                 setMode('view'); setP1(null); setP2(null); setTempP2(null); setMeasureResult(null);
-            }, [currentPage, planData]);
-
-            // Reset tools when page changes
-            useEffect(() => {
-                setMode('view'); setP1(null); setP2(null); setTempP2(null); setMeasureResult(null);
-            }, [currentPage, planData]);
+            }, [currentPage, planId]);
 
 
             const handleMouseDown = (e) => {
@@ -925,7 +952,7 @@
                                 <span className="text-xs text-gray-500">Small</span>
                                 <input
                                     type="range"
-                                    min="0.5"
+                                    min="0.1"
                                     max="2.0"
                                     step="0.1"
                                     value={pinScale || 1}
@@ -1020,17 +1047,55 @@
                             const demoProjClean = { ...demoProj, plans: [] }; // Don't verify plans in project object anymore
 
                             await db.projects.add(demoProjClean);
-                            await db.plans.bulkAdd(demoPlans);
+
+                            const demoPlan = demoPlans[0];
+                            await db.plans.add({ ...demoPlan, data: null }); // Clear data
+                            await db.planPages.put({ planId: demoPlan.id, pageIndex: 0, data: demoPlan.data });
 
                             // Reload fully
                             projs = [demoProjClean];
                         }
 
-                        // Attach plans to projects in memory for the app to use
+                        // MIGRATION: Check for legacy plans with data in 'plans' table and move to 'planPages'
                         const allPlans = await db.plans.toArray();
+                        let migrationCount = 0;
+
+                        for (const plan of allPlans) {
+                            if (plan.data) {
+                                // Legacy Data found
+                                if (Array.isArray(plan.data)) {
+                                    // Raster PDF or multi-page image
+                                    const pages = plan.data.map((imgData, index) => ({
+                                        planId: plan.id,
+                                        pageIndex: index,
+                                        data: imgData
+                                    }));
+                                    await db.planPages.bulkPut(pages);
+                                } else if (typeof plan.data === 'string') {
+                                    // Single image or legacy PDF string
+                                    // If it's a legacy PDF string (starts with data:application/pdf), we might want to warn or just leave it?
+                                    // The user said "Old PDF plans will no longer work heavily". 
+                                    // But let's migrate single images.
+                                    await db.planPages.put({ planId: plan.id, pageIndex: 0, data: plan.data });
+                                }
+
+                                // Clear data from plan record to free memory
+                                await db.plans.update(plan.id, { data: null });
+                                migrationCount++;
+                            }
+                        }
+
+                        if (migrationCount > 0) {
+                            console.log(`Migrated ${migrationCount} plans to new schema.`);
+                        }
+
+                        // Reload plans after migration (now light-weight)
+                        const hydratedPlans = await db.plans.toArray();
+
+                        // Attach plans to projects in memory
                         const hydratedProjects = projs.map(p => ({
                             ...p,
-                            plans: allPlans.filter(plan => plan.projectId === p.id)
+                            plans: hydratedPlans.filter(plan => plan.projectId === p.id)
                         }));
 
                         setProjects(hydratedProjects);
@@ -1130,10 +1195,20 @@
             const createProject = async () => {
                 if (!newProjectName.trim()) return;
                 const newProjId = generateId();
-                const newPlanId = generateId();
+
+                let newPlanId;
+                let finalPlanType = newProjectType;
+
+                if (newProjectType === 'raster_pdf_db') {
+                    // Reuse ID from pre-saved PDF
+                    newPlanId = newProjectPlan.dbPlanId;
+                    finalPlanType = 'raster_pdf';
+                } else {
+                    newPlanId = generateId();
+                }
 
                 // data can be array (raster_pdf) or string (image)
-                const newPlan = { id: newPlanId, projectId: newProjId, name: "Main Plan", type: newProjectType, data: newProjectPlan, pages: newProjectPages };
+                const newPlan = { id: newPlanId, projectId: newProjId, name: "Main Plan", type: finalPlanType, data: null, pages: newProjectPages };
 
                 const newProj = {
                     id: newProjId,
@@ -1149,7 +1224,18 @@
 
                 // Add to DB (Separate Tables)
                 await db.projects.add(newProj);
-                await db.plans.add(newPlan);
+
+                // Save Plan wrapper
+                await db.plans.add({ ...newPlan, data: null });
+
+                // Save Plan Page (Index 0) - Only if NOT already saved (like PDF)
+                if (newProjectType !== 'raster_pdf_db') {
+                    await db.planPages.put({
+                        planId: newPlanId,
+                        pageIndex: 0,
+                        data: newProjectPlan
+                    });
+                }
 
                 setNewProjectName("");
                 setNewProjectAddress("");
@@ -1161,22 +1247,54 @@
 
             const addPlanToProject = async () => {
                 if (!newPlanFile || !newPlanName.trim()) return;
+
+                let newPlanId;
+                let finalPlanType = newPlanFile.type;
+                let finalData = null;
+
+                if (newPlanFile.type === 'raster_pdf_db') {
+                    // Plan is already partially saved in 'planPages' with this ID
+                    newPlanId = newPlanFile.data.dbPlanId;
+                    finalPlanType = 'raster_pdf'; // revert to standard type name for viewer
+                } else {
+                    newPlanId = generateId();
+                    finalData = null; // Storing in pages table
+                }
+
                 const newPlan = {
-                    id: generateId(),
+                    id: newPlanId,
                     projectId: activeProjectId,
                     name: newPlanName,
-                    type: newPlanFile.type,
-                    data: newPlanFile.data,
+                    type: finalPlanType,
+                    data: null,
                     pages: newPlanFile.pages
                 };
 
-                // State Update
+                // DB Update Plan Record
+                await db.plans.add(newPlan);
+
+                // DB Update Pages (for non-pre-saved types like Image)
+                if (newPlanFile.type !== 'raster_pdf_db') {
+                    if (newPlanFile.data) {
+                        if (Array.isArray(newPlanFile.data)) {
+                            // Should not happen for new PDF uploads as they go via DB path, 
+                            // but maybe multi-image upload in future?
+                            const pages = newPlanFile.data.map((imgData, index) => ({
+                                planId: newPlanId,
+                                pageIndex: index,
+                                data: imgData
+                            }));
+                            await db.planPages.bulkPut(pages);
+                        } else if (typeof newPlanFile.data === 'string') {
+                            await db.planPages.put({ planId: newPlanId, pageIndex: 0, data: newPlanFile.data });
+                        }
+                    }
+                }
+
+                // State Update (Hydrate just this plan for immediate UI feedback? No, better to reload or just push lightweight object)
                 const updatedProj = { ...activeProject, plans: [...(activeProject.plans || []), newPlan] };
                 const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
                 setProjects(updatedList);
-
-                // DB Update
-                await db.plans.add(newPlan);
 
                 setNewPlanName("");
                 setNewPlanFile(null);
@@ -1340,47 +1458,45 @@
 
             // --- EXPORT LOGIC ---
             // Helper to render specific PDF page to canvas
+            // --- EXPORT LOGIC ---
+            // Helper to render specific PDF page to canvas
             const generatePageImage = async (plan, pageNum) => {
                 if (!plan) return null;
 
-                // Handle Image Type (String)
-                if (typeof plan.data === 'string') {
-                    return new Promise((resolve) => {
-                        const img = new Image();
-                        img.crossOrigin = "anonymous";
-                        img.src = plan.data;
-                        img.onload = () => {
-                            const canvas = document.createElement('canvas');
-                            canvas.width = 1200;
-                            const scale = 1200 / img.width;
-                            canvas.height = img.height * scale;
-                            const ctx = canvas.getContext('2d');
-                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                            resolve({ canvas, width: canvas.width, height: canvas.height });
-                        }
-                        img.onerror = () => resolve(null);
-                    });
-                }
+                // ASYNC FETCH FROM DB (New Schema)
+                try {
+                    // Try fetch from planPages table
+                    let imgData = null;
 
-                // Handle Raster PDF Type (Array of Strings)
-                if (Array.isArray(plan.data)) {
-                    return new Promise((resolve) => {
-                        const imgData = plan.data[pageNum - 1];
-                        if (!imgData) {
-                            resolve(null);
-                            return;
+                    // Logic:
+                    // If plan.type == 'image', pageNum is 1 (or 0 index).
+                    // If plan.type == 'raster_pdf', pageNum is 1..N.
+                    const index = (plan.type === 'image') ? 0 : (pageNum - 1);
+
+                    const pageRec = await db.planPages.get({ planId: plan.id, pageIndex: index });
+                    if (pageRec) {
+                        imgData = pageRec.data;
+                    } else {
+                        // Fallback to legacy 'data' property if exists (for pre-migration validation or fallback)
+                        if (typeof plan.data === 'string') {
+                            imgData = plan.data;
+                        } else if (Array.isArray(plan.data)) {
+                            imgData = plan.data[index];
                         }
+                    }
+
+                    if (!imgData) return null;
+
+                    return new Promise((resolve) => {
                         const img = new Image();
                         img.crossOrigin = "anonymous";
                         img.src = imgData;
                         img.onload = () => {
                             const canvas = document.createElement('canvas');
-                            // Use native resolution of the stored image, or scale down if huge?
-                            // Stored images are already resized to max 3400px.
-                            // For export, 1200px width is usually sufficient for Word docs to keep size down,
-                            // but let's keep it decent quality. 
-                            // The previous code scaled 'image' type to 1200px. 
-                            canvas.width = 1600; // Slightly better quality for PDF export
+                            // Use native resolution or scale?
+                            // Stored images are already resized to max 2400px.
+                            // For export, we want good quality.
+                            canvas.width = 1600;
                             const scale = 1600 / img.width;
                             canvas.height = img.height * scale;
                             const ctx = canvas.getContext('2d');
@@ -1389,9 +1505,11 @@
                         }
                         img.onerror = () => resolve(null);
                     });
-                }
 
-                return null;
+                } catch (err) {
+                    console.error("Error generating page image", err);
+                    return null;
+                }
             };
 
             const generatePlanWithPinsImage = async (plan, pageNum) => {
@@ -1723,40 +1841,26 @@
                     return;
                 }
 
-                // Find all unique plan/page combinations that have pins
-                const uniquePages = [];
-                const processed = new Set();
+                // Gather all pages to export
+                const pagesToExport = [];
 
-                // Helper to add page
-                const addPage = (pid, pg) => {
-                    const key = `${pid}-${pg}`;
-                    if (!processed.has(key)) {
-                        processed.add(key);
-                        uniquePages.push({ planId: pid, page: pg });
-                    }
-                };
-
-                // If no observations, try to export at least the active plan page 1
-                if (!activeReport.observations || activeReport.observations.length === 0) {
-                    if (activePlan) addPage(activePlan.id, 1);
-                    else if (activeProject.plans && activeProject.plans.length > 0) addPage(activeProject.plans[0].id, 1);
-                } else {
-                    activeReport.observations.forEach(o => {
-                        const pid = o.planId || (activeProject.plans && activeProject.plans[0] ? activeProject.plans[0].id : 'legacy');
-                        const pg = o.page || 1;
-                        addPage(pid, pg);
+                if (activeProject.plans && activeProject.plans.length > 0) {
+                    activeProject.plans.forEach(plan => {
+                        const numPages = plan.pages || 1;
+                        for (let i = 1; i <= numPages; i++) {
+                            pagesToExport.push({ planId: plan.id, page: i });
+                        }
                     });
+                } else if (activeProject.planData) {
+                    // Legacy Fallback
+                    const totalPages = activeProject.totalPages || 1;
+                    for (let i = 1; i <= totalPages; i++) {
+                        pagesToExport.push({ planId: 'legacy', page: i });
+                    }
                 }
 
-                // Sort pages
-                uniquePages.sort((a, b) => {
-                    // Sort by plan ID first, then page number
-                    if (a.planId !== b.planId) return (a.planId || '').localeCompare(b.planId || '');
-                    return a.page - b.page;
-                });
-
-                if (uniquePages.length === 0) {
-                    alert("Nothing to export.");
+                if (pagesToExport.length === 0) {
+                    alert("No plans to export.");
                     return;
                 }
 
@@ -1770,8 +1874,10 @@
                 const pdfWidth = doc.internal.pageSize.getWidth();
                 const pdfHeight = doc.internal.pageSize.getHeight();
 
-                for (let i = 0; i < uniquePages.length; i++) {
-                    const item = uniquePages[i];
+                let pageAddedCount = 0;
+
+                for (let i = 0; i < pagesToExport.length; i++) {
+                    const item = pagesToExport[i];
 
                     // Find the plan object
                     let plan = activeProject.plans ? activeProject.plans.find(p => p.id === item.planId) : null;
@@ -1791,7 +1897,8 @@
                         try {
                             const imgDataUrl = await generatePlanWithPinsImage(plan, item.page);
                             if (imgDataUrl) {
-                                if (i > 0) doc.addPage();
+                                if (pageAddedCount > 0) doc.addPage();
+                                pageAddedCount++;
 
                                 // Get image dimensions to fit
                                 const imgProps = doc.getImageProperties(imgDataUrl);
@@ -1799,7 +1906,6 @@
                                 const imgHeight = imgProps.height;
 
                                 // Fit to PDF Page (maintaining aspect ratio)
-                                // We want to fit within margins, say 20pt
                                 const margin = 20;
                                 const availWidth = pdfWidth - (margin * 2);
                                 const availHeight = pdfHeight - (margin * 2);
@@ -2030,7 +2136,7 @@
                     <div className="flex-1 relative overflow-hidden">
                         {activePlan ? (
                             <PlanViewer
-                                planData={activePlan.data}
+                                planId={activePlan.id}
                                 planType={activePlan.type}
                                 totalPages={activePlan.pages || 1}
                                 currentPage={currentPage}
