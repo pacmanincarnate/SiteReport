@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SiteLens 0.2 - Architect Field Report Tool</title>
+    <title>SiteLens - Architect Field Report Tool</title>
 
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -110,6 +110,7 @@
         const Minimize2 = (props) => <IconBase {...props}><polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" /><line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" /></IconBase>;
         const Slash = (props) => <IconBase {...props}><circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" /></IconBase>;
         const Anchor = (props) => <IconBase {...props}><circle cx="12" cy="5" r="3" /><line x1="12" y1="22" x2="12" y2="8" /><path d="M5 12H2a10 10 0 0 0 20 0h-3" /></IconBase>;
+        const List = (props) => <IconBase {...props}><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></IconBase>;
         const HelpCircle = (props) => <IconBase {...props}><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></IconBase>;
 
 
@@ -280,28 +281,34 @@
         };
 
         // Photo Editor (Canvas)
-        const PhotoEditor = ({ imageSrc, onSave, onCancel }) => {
+        const PhotoEditor = ({ imageSrc, backgroundImageSrc, onSave, onCancel }) => {
             const canvasRef = useRef(null);
             const [color, setColor] = useState('#ef4444');
             const [lineWidth, setLineWidth] = useState(4);
             const [isDrawing, setIsDrawing] = useState(false);
             const [history, setHistory] = useState([]);
 
+            // Load Content
             useEffect(() => {
                 let isMounted = true;
                 const canvas = canvasRef.current;
                 if (!canvas) return;
 
                 const ctx = canvas.getContext('2d');
+
+                // Determine source for sizing: background (Plan) or direct image (Photo)
+                const sourceSrc = backgroundImageSrc || imageSrc;
+                if (!sourceSrc) return; // Should not happen
+
                 const img = new Image();
                 img.crossOrigin = "anonymous";
-                img.src = imageSrc;
+                img.src = sourceSrc;
 
                 img.onload = () => {
                     if (!isMounted) return;
 
                     const maxWidth = window.innerWidth;
-                    const maxHeight = window.innerHeight * 0.7;
+                    const maxHeight = window.innerHeight * 0.8; // More space for tools
                     let width = img.width;
                     let height = img.height;
 
@@ -315,16 +322,29 @@
 
                     canvas.width = width;
                     canvas.height = height;
-                    ctx.drawImage(img, 0, 0, width, height);
 
-                    setHistory(prev => {
-                        if (prev.length === 0) return [canvas.toDataURL()];
-                        return prev;
-                    });
+                    // If NOT using separate background, draw image on canvas (Photo Mode)
+                    if (!backgroundImageSrc) {
+                        ctx.drawImage(img, 0, 0, width, height);
+                    }
+
+                    // If using separate background, we might want to load existing markup (imageSrc) 
+                    // onto the transparent canvas. 
+                    if (backgroundImageSrc && imageSrc) {
+                        const markupImg = new Image();
+                        markupImg.crossOrigin = "anonymous";
+                        markupImg.src = imageSrc;
+                        markupImg.onload = () => {
+                            ctx.drawImage(markupImg, 0, 0, width, height);
+                            setHistory([canvas.toDataURL()]);
+                        }
+                    } else {
+                        setHistory([canvas.toDataURL()]);
+                    }
                 };
 
                 return () => { isMounted = false; };
-            }, [imageSrc]);
+            }, [imageSrc, backgroundImageSrc]);
 
             const saveState = () => {
                 const canvas = canvasRef.current;
@@ -334,6 +354,8 @@
             };
 
             const startDrawing = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 const canvas = canvasRef.current;
                 if (!canvas) return;
                 const rect = canvas.getBoundingClientRect();
@@ -351,6 +373,8 @@
             };
 
             const draw = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 if (!isDrawing) return;
                 const canvas = canvasRef.current;
                 if (!canvas) return;
@@ -384,6 +408,12 @@
                     if (!canvas) return;
                     const ctx = canvas.getContext('2d');
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                    // For Photo Mode, we need to redraw original base? 
+                    // Actually history contains snapshots of whole canvas.
+                    // If Background Mode: snapshots are just lines (transparent).
+                    // If Photo Mode: snapshots are full image.
+                    // So just drawImage is correct for both.
                     ctx.drawImage(img, 0, 0);
                 };
             };
@@ -408,7 +438,42 @@
                             <button onClick={handleSave} className="p-2 bg-white text-black rounded-full"><Check size={24} /></button>
                         </div>
                     </div>
-                    <div className="flex-1 flex items-center justify-center bg-gray-900 overflow-hidden touch-none">
+                    <div className="flex-1 flex items-center justify-center bg-gray-900 overflow-hidden touch-none relative">
+                        {/* Background Layer (for Plan Markup Mode) */}
+                        {backgroundImageSrc && (
+                            <img
+                                src={backgroundImageSrc}
+                                className="absolute"
+                                style={{
+                                    maxWidth: '100vw',
+                                    maxHeight: '80vh',
+                                    // Sizing handled by canvas logic referencing this mostly, 
+                                    // but we need them to match exactly.
+                                    // Best approach: Let canvas determine size, and force img to match canvas style?
+                                    // Or just use the same logic?
+                                    // Simpler: The canvas sizing logic sets canvas.width/height attributes.
+                                    // CSS size of canvas is default (auto).
+                                    // So if we set width/height on IMG to match canvas.width/height (attributes), it might work.
+                                    // But canvas is scaled by browser if CSS differs?
+                                    // Let's rely on the fact that we set canvas.width/height explicitly based on screen fit logic.
+                                    // We can just hide this img and draw it on a 'background canvas' or just use a div with bg image?
+                                    // Let's try absolute positioning with exact dimensions matching what we calculated.
+                                    // Actually, we can just use the canvas ref to sync?
+                                    // React way: state for dimensions?
+                                    // Helper: just render the image behind, let CSS center both?
+                                    zIndex: 0
+                                }}
+                                // The canvas sizing logic calculated 'width' and 'height'. 
+                                // We ideally want to apply those to this image ensuring it matches the overlay canvas.
+                                ref={(el) => {
+                                    if (el && canvasRef.current) {
+                                        el.width = canvasRef.current.width;
+                                        el.height = canvasRef.current.height;
+                                    }
+                                }}
+                            />
+                        )}
+
                         <canvas
                             ref={canvasRef}
                             onMouseDown={startDrawing}
@@ -418,7 +483,7 @@
                             onTouchStart={startDrawing}
                             onTouchMove={draw}
                             onTouchEnd={stopDrawing}
-                            className="bg-gray-800 shadow-lg"
+                            className="bg-transparent shadow-lg z-10" // Transparent!
                         />
                     </div>
                 </div>
@@ -426,14 +491,21 @@
         };
 
         // 2. Plan Viewer
-        const PlanViewer = ({ planId, planType, totalPages, currentPage, onPageChange, pins, onAddPin, onSelectPin, selectedPinId, planScale, onUpdateScale, pinScale }) => {
+        const PlanViewer = ({ planId, planType, totalPages, currentPage, onPageChange, pins, onAddPin, onSelectPin, selectedPinId, planScale, onUpdateScale, pinScale, onMovePin, isDrawingMode, initialMarkup, onSaveMarkup, onCancelMarkup }) => {
             const containerRef = useRef(null);
+            const contentRef = useRef(null);
+            const drawingCanvasRef = useRef(null);
             const clickStartRef = useRef({ x: 0, y: 0 });
 
             const [scale, setScale] = useState(1);
             const [offset, setOffset] = useState({ x: 0, y: 0 });
             const [isDragging, setIsDragging] = useState(false);
+
             const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+            // Pin Dragging State
+            const [isPinDragging, setIsPinDragging] = useState(false);
+            const [dragPinPos, setDragPinPos] = useState(null); // { x, y }
 
             const lastTouchDistance = useRef(null); // For pinch-to-zoom
 
@@ -443,6 +515,12 @@
             const [p2, setP2] = useState(null);
             const [tempP2, setTempP2] = useState(null);
             const [measureResult, setMeasureResult] = useState(null);
+
+            // Drawing State
+            const [drawingColor, setDrawingColor] = useState('#ef4444'); // Default red
+            const [drawingLineWidth, setDrawingLineWidth] = useState(4);
+            const [isDrawingStroke, setIsDrawingStroke] = useState(false);
+            const [history, setHistory] = useState([]);
 
             // Determine current image source - ASYNC FETCH FROM DB
             const [currentImageSrc, setCurrentImageSrc] = useState(null);
@@ -478,21 +556,167 @@
                 setMode('view'); setP1(null); setP2(null); setTempP2(null); setMeasureResult(null);
             }, [currentPage, planId]);
 
+            // Initialize Drawing Canvas
+            useEffect(() => {
+                if (drawingCanvasRef.current && currentImageSrc) {
+                    const canvas = drawingCanvasRef.current;
+                    const ctx = canvas.getContext('2d');
+                    // We need to set canvas size to match the image natural size.
+                    // The img has style={{ width: '1000px' }}.
+                    // So canvas should be width=1000. Height proportional.
+                    const img = contentRef.current?.querySelector('img');
+                    if (img) {
+                        canvas.width = 1000;
+                        canvas.height = img.naturalHeight * (1000 / img.naturalWidth) || 700;
+                    }
+
+                    if (initialMarkup) {
+                        const mImg = new Image();
+                        mImg.onload = () => ctx.drawImage(mImg, 0, 0);
+                        mImg.src = initialMarkup;
+                        setHistory([initialMarkup]);
+                    }
+                }
+            }, [currentImageSrc, initialMarkup, isDrawingMode]);
+
+            // --- DRAWING HANDLERS ---
+            const getDrawCoords = (e) => {
+                const canvas = drawingCanvasRef.current;
+                if (!canvas) return null;
+                const rect = canvas.getBoundingClientRect();
+
+                let clientX, clientY;
+                if (e.changedTouches) {
+                    clientX = e.changedTouches[0].clientX;
+                    clientY = e.changedTouches[0].clientY;
+                } else {
+                    clientX = e.clientX;
+                    clientY = e.clientY;
+                }
+
+                // Map screen to canvas coordinates
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+
+                return {
+                    x: (clientX - rect.left) * scaleX,
+                    y: (clientY - rect.top) * scaleY
+                };
+            };
+
+            const startStroke = (e) => {
+                if (!isDrawingMode) return;
+                // e.preventDefault(); // Handled in main handler
+                const coords = getDrawCoords(e);
+                if (!coords) return;
+
+                setIsDrawingStroke(true);
+                const ctx = drawingCanvasRef.current.getContext('2d');
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.strokeStyle = drawingColor;
+                ctx.lineWidth = drawingLineWidth;
+                ctx.beginPath();
+                ctx.moveTo(coords.x, coords.y);
+            };
+
+            const drawStroke = (e) => {
+                if (!isDrawingMode || !isDrawingStroke) return;
+                const coords = getDrawCoords(e);
+                if (!coords) return;
+
+                const ctx = drawingCanvasRef.current.getContext('2d');
+                ctx.lineTo(coords.x, coords.y);
+                ctx.stroke();
+            };
+
+            const stopStroke = () => {
+                if (!isDrawingMode || !isDrawingStroke) return;
+                setIsDrawingStroke(false);
+                const ctx = drawingCanvasRef.current.getContext('2d');
+                ctx.closePath();
+                setHistory(prev => [...prev, drawingCanvasRef.current.toDataURL()]);
+            };
+
+            const undoStroke = () => {
+                const ctx = drawingCanvasRef.current.getContext('2d');
+                if (history.length <= 1) { // Clear if only 1 (initial) or 0
+                    ctx.clearRect(0, 0, drawingCanvasRef.current.width, drawingCanvasRef.current.height);
+                    setHistory([]);
+                    return;
+                }
+                const newHistory = history.slice(0, -1);
+                setHistory(newHistory);
+                const prevImgSrc = newHistory[newHistory.length - 1];
+                const img = new Image();
+                img.onload = () => {
+                    ctx.clearRect(0, 0, drawingCanvasRef.current.width, drawingCanvasRef.current.height);
+                    ctx.drawImage(img, 0, 0);
+                };
+                img.src = prevImgSrc;
+            };
+
+            const saveDrawing = () => {
+                if (!drawingCanvasRef.current) return;
+                const dataUrl = drawingCanvasRef.current.toDataURL('image/png');
+                onSaveMarkup(dataUrl);
+            };
+
 
             const handleMouseDown = (e) => {
-                if (e.target.closest('.pin-marker')) return;
+                if (isDrawingMode) {
+                    startStroke(e);
+                    return;
+                }
+
+                const pinNode = e.target.closest('.pin-marker');
+                if (pinNode) {
+                    const pinId = pinNode.dataset.pinId;
+                    if (pinId === selectedPinId) {
+                        setIsPinDragging(true);
+                        e.preventDefault();
+                    }
+                    return;
+                }
+
                 setIsDragging(true);
                 setDragStart({ x: e.clientX - offset.x, y: e.clientY - offset.y });
                 clickStartRef.current = { x: e.clientX, y: e.clientY };
             };
 
             const handleMouseMove = (e) => {
+                if (isDrawingMode) {
+                    drawStroke(e);
+                    return;
+                }
+
+                if (isPinDragging && contentRef.current) {
+                    e.preventDefault();
+                    const rect = contentRef.current.getBoundingClientRect();
+                    const xPct = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+                    const yPct = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
+                    setDragPinPos({ x: xPct, y: yPct });
+                    return;
+                }
                 if (!isDragging) return;
                 e.preventDefault();
                 setOffset({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
             };
 
-            const handleMouseUp = () => setIsDragging(false);
+            const handleMouseUp = (e) => {
+                if (isDrawingMode) {
+                    stopStroke(e);
+                    return;
+                }
+                if (isPinDragging) {
+                    if (dragPinPos && onMovePin) {
+                        onMovePin(selectedPinId, dragPinPos.x, dragPinPos.y);
+                    }
+                    setIsPinDragging(false);
+                    setDragPinPos(null);
+                }
+                setIsDragging(false);
+            };
             const handleZoom = (delta) => setScale(prev => Math.max(0.5, Math.min(4, prev + delta)));
 
             // --- TOUCH HANDLERS ---
@@ -503,45 +727,74 @@
             };
 
             const handleTouchStart = (e) => {
+                if (isDrawingMode) {
+                    if (e.touches.length === 1) {
+                        startStroke(e);
+                    } else {
+                        // 2+ fingers: Pan/Zoom
+                        const dist = getTouchDistance(e.touches);
+                        lastTouchDistance.current = dist;
+                        setIsDragging(true);
+                        setDragStart({ x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - offset.x, y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - offset.y });
+                    }
+                    return;
+                }
+
                 if (e.target.closest('.pin-marker')) return;
 
                 if (e.touches.length === 1) {
-                    // Pan Start
                     setIsDragging(true);
                     setDragStart({ x: e.touches[0].clientX - offset.x, y: e.touches[0].clientY - offset.y });
                     clickStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
                 } else if (e.touches.length === 2) {
-                    // Pinch Start
                     const dist = getTouchDistance(e.touches);
                     lastTouchDistance.current = dist;
                 }
             };
 
             const handleTouchMove = (e) => {
+                if (isDrawingMode) {
+                    if (e.touches.length === 1) {
+                        drawStroke(e);
+                    } else if (e.touches.length === 2) {
+                        e.preventDefault();
+                        const dist = getTouchDistance(e.touches);
+                        if (lastTouchDistance.current) {
+                            const delta = dist - lastTouchDistance.current;
+                            handleZoom(delta * 0.005);
+
+                            const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                            const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                            setOffset({ x: cx - dragStart.x, y: cy - dragStart.y });
+                        }
+                        lastTouchDistance.current = dist;
+                    }
+                    return;
+                }
+
                 if (e.touches.length === 1 && isDragging) {
-                    // Pan Move
-                    // e.preventDefault(); // Prevent scrolling - handled by CSS touch-action: none usually, but good here too
                     setOffset({ x: e.touches[0].clientX - dragStart.x, y: e.touches[0].clientY - dragStart.y });
                 } else if (e.touches.length === 2) {
-                    // Pinch Move
                     e.preventDefault();
                     const dist = getTouchDistance(e.touches);
                     if (lastTouchDistance.current) {
                         const delta = dist - lastTouchDistance.current;
-                        // Sensitivity factor
-                        const zoomFactor = delta * 0.005;
-                        handleZoom(zoomFactor);
+                        handleZoom(delta * 0.005);
                     }
                     lastTouchDistance.current = dist;
                 }
             };
 
-            const handleTouchEnd = () => {
+            const handleTouchEnd = (e) => {
+                if (isDrawingMode) {
+                    stopStroke(e);
+                }
                 setIsDragging(false);
                 lastTouchDistance.current = null;
             };
 
             const handleImageClick = (e) => {
+                if (isDrawingMode) return;
                 if (isDragging) return;
 
                 // Calculate distance from start to determine if it was a drag or a click
@@ -605,8 +858,45 @@
             // Filter pins for this page
             const visiblePins = pins.filter(p => (p.page || 1) === currentPage);
 
+            // Filter markups for this page
+            const visibleMarkups = pins.filter(p => (p.page || 1) === currentPage && p.planMarkup);
+
             return (
                 <div className="relative w-full h-full bg-gray-100 dark:bg-gray-900 overflow-hidden flex flex-col transition-colors">
+                    {/* DRAWING TOOLBAR - Floating */}
+                    {isDrawingMode && (
+                        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50 bg-gray-900 text-white px-4 py-3 rounded-2xl shadow-2xl flex items-center space-x-4 animate-in fade-in slide-in-from-top-4 duration-200">
+                            <div className="flex items-center space-x-2 border-r border-gray-700 pr-4">
+                                {['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#000000', '#ffffff'].map(c => (
+                                    <button
+                                        key={c}
+                                        onClick={() => setDrawingColor(c)}
+                                        className={`w-8 h-8 rounded-full border-2 ${drawingColor === c ? 'border-white scale-110' : 'border-transparent hover:scale-105'}`}
+                                        style={{ backgroundColor: c }}
+                                    />
+                                ))}
+                            </div>
+
+                            <div className="flex flex-col w-24">
+                                <label className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1">Size: {drawingLineWidth}px</label>
+                                <input
+                                    type="range"
+                                    min="1"
+                                    max="20"
+                                    value={drawingLineWidth}
+                                    onChange={(e) => setDrawingLineWidth(parseInt(e.target.value))}
+                                    className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-white"
+                                />
+                            </div>
+
+                            <div className="h-8 w-px bg-gray-700 mx-2"></div>
+
+                            <button onClick={undoStroke} className="p-2 hover:bg-gray-800 rounded-lg text-gray-300 hover:text-white" title="Undo"><Undo size={20} /></button>
+                            <button onClick={saveDrawing} className="p-2 bg-white text-black rounded-lg font-bold text-sm px-4 hover:bg-gray-200">Save</button>
+                            <button onClick={onCancelMarkup} className="p-2 hover:bg-gray-800 rounded-lg text-gray-400 hover:text-white"><X size={20} /></button>
+                        </div>
+                    )}
+
                     {/* Zoom & Page Controls */}
                     {/* Unified Bottom Controls */}
                     <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 z-10 flex items-center space-x-4 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm p-2 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 transition-all hover:bg-white dark:hover:bg-gray-800">
@@ -644,7 +934,7 @@
 
                     <div
                         ref={containerRef}
-                        className={`flex-1 relative touch-none flex items-center justify-center ${mode === 'view' ? 'cursor-move' : 'cursor-crosshair'}`}
+                        className={`flex-1 relative touch-none flex items-center justify-center ${isDrawingMode ? 'cursor-crosshair' : (mode === 'view' ? 'cursor-move' : 'cursor-crosshair')} ${isDrawingMode ? 'bg-gray-800' : ''}`}
                         onMouseDown={handleMouseDown}
                         onMouseMove={handleMouseMove}
                         onMouseUp={handleMouseUp}
@@ -654,6 +944,7 @@
                         onTouchEnd={handleTouchEnd}
                     >
                         <div
+                            ref={contentRef}
                             style={{
                                 transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
                                 transition: isDragging ? 'none' : 'transform 0.1s ease-out'
@@ -661,17 +952,35 @@
                             className="relative shadow-2xl origin-center"
                         >
                             {currentImageSrc ? (
-                                <img
-                                    src={currentImageSrc}
-                                    alt="Floor Plan"
-                                    className="max-w-none pointer-events-auto select-none"
-                                    style={{ width: '1000px' }} // Initial width for consistency, or maybe adjust based on natural size?
-                                    // Actually, let's keep it simple. The PDF/Image is the source. 
-                                    // If we want to respect the "Scale" state, we do that in the parent div transform.
-                                    draggable={false}
-                                    onClick={handleImageClick}
-                                    onMouseMove={handleMouseMoveImg}
-                                />
+                                <>
+                                    <img
+                                        src={currentImageSrc}
+                                        alt="Floor Plan"
+                                        className="max-w-none pointer-events-auto select-none"
+                                        style={{ width: '1000px' }}
+                                        draggable={false}
+                                        onClick={handleImageClick}
+                                        onMouseMove={handleMouseMoveImg}
+                                    />
+
+                                    {/* Drawing Canvas Layer */}
+                                    {isDrawingMode && (
+                                        <canvas
+                                            ref={drawingCanvasRef}
+                                            className="absolute inset-0 z-30 pointer-events-none"
+                                            style={{ width: '100%', height: '100%' }}
+                                        />
+                                    )}
+                                    {/* Overlay Markups */}
+                                    {visibleMarkups.map(markup => (
+                                        <img
+                                            key={`markup-${markup.id}`}
+                                            src={markup.planMarkup}
+                                            className="absolute inset-0 pointer-events-none select-none"
+                                            style={{ width: '100%', height: '100%', zIndex: 5 }}
+                                        />
+                                    ))}
+                                </>
                             ) : (
                                 <div style={{ width: 1000, height: 700 }} className="absolute inset-0 bg-white flex items-center justify-center flex-col z-20 pointer-events-none">
                                     <div className="text-gray-400 font-medium">No Plan Loaded</div>
@@ -710,10 +1019,14 @@
                                 return (
                                     <div
                                         key={pin.id}
+                                        data-pin-id={pin.id}
                                         className={`pin-marker absolute transform -translate-x-1/2 -translate-y-1/2 cursor-pointer transition-transform hover:scale-125
                                         ${selectedPinId === pin.id ? 'z-20 scale-125' : 'z-10'}
                                     `}
-                                        style={{ left: `${pin.x}%`, top: `${pin.y}%` }}
+                                        style={{
+                                            left: `${(isPinDragging && selectedPinId === pin.id && dragPinPos) ? dragPinPos.x : pin.x}%`,
+                                            top: `${(isPinDragging && selectedPinId === pin.id && dragPinPos) ? dragPinPos.y : pin.y}%`
+                                        }}
                                         onClick={(e) => { e.stopPropagation(); onSelectPin(pin.id); }}
                                     >
                                         <div className="relative flex items-center justify-center">
@@ -758,8 +1071,13 @@
         };
 
         // 3. Observation Drawer
-        const ObservationDrawer = ({ isOpen, observation, onClose, onChange, onTakePhoto, onRemove, onMarkup }) => {
+        const ObservationDrawer = (props) => {
+            const { isOpen, observation, onClose, onChange, onTakePhoto, onRemove, onMarkup, onStartDrawing } = props;
+
             if (!isOpen || !observation) return null;
+
+            console.log("ObservationDrawer Props:", props);
+            console.log("onStartDrawing type:", typeof onStartDrawing);
 
             const isFacade = observation.type === 'Facade';
 
@@ -879,6 +1197,8 @@
                         <div>
                             <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">Notes</label>
                             <textarea
+                                value={observation.description || ""}
+                                onChange={(e) => onChange('description', e.target.value)}
                                 placeholder="Add detailed notes here..."
                                 className="w-full h-32 bg-gray-50 dark:bg-gray-800 dark:text-gray-100 rounded-lg p-4 text-sm focus:ring-2 focus:ring-black dark:focus:ring-white outline-none resize-none mb-2"
                             />
@@ -887,7 +1207,16 @@
                     </div>
                     <div className="p-4 border-t dark:border-gray-800 bg-gray-50 dark:bg-gray-900 flex justify-between shrink-0 transition-colors">
                         <button onClick={onRemove} className="text-red-500 text-sm font-medium hover:underline">Delete</button>
-                        <button onClick={onClose} className="bg-black dark:bg-white text-white dark:text-black px-6 py-2 rounded-lg text-sm font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition-colors">Done</button>
+                        <div className="flex space-x-3">
+                            <button
+                                onClick={onStartDrawing}
+                                className="bg-gray-200 dark:bg-gray-700 p-2 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                                title="Draw on Plan"
+                            >
+                                <PenTool size={20} className="text-gray-700 dark:text-gray-200" />
+                            </button>
+                            <button onClick={onClose} className="bg-black dark:bg-white text-white dark:text-black px-6 py-2 rounded-lg text-sm font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition-colors">Done</button>
+                        </div>
                     </div>
                 </div>
             );
@@ -970,6 +1299,122 @@
                 </Modal>
             );
         }
+
+        // 4. Observation List Side Panel (Resizable)
+        const ObservationListPanel = ({ isOpen, onClose, observations, onSelectObservation, selectedPinId }) => {
+            const [width, setWidth] = useState(320); // Default 320px
+            const [isResizing, setIsResizing] = useState(false);
+            const sidebarRef = useRef(null);
+
+            const startResizing = useCallback((mouseDownEvent) => {
+                mouseDownEvent.preventDefault();
+                setIsResizing(true);
+            }, []);
+
+            const stopResizing = useCallback(() => {
+                setIsResizing(false);
+            }, []);
+
+            const resize = useCallback(
+                (mouseMoveEvent) => {
+                    if (isResizing) {
+                        const newWidth = mouseMoveEvent.clientX - sidebarRef.current.getBoundingClientRect().left;
+                        if (newWidth > 200 && newWidth < 600) { // Min/Max constraints
+                            setWidth(newWidth);
+                        }
+                    }
+                },
+                [isResizing]
+            );
+
+            useEffect(() => {
+                window.addEventListener("mousemove", resize);
+                window.addEventListener("mouseup", stopResizing);
+                return () => {
+                    window.removeEventListener("mousemove", resize);
+                    window.removeEventListener("mouseup", stopResizing);
+                };
+            }, [resize, stopResizing]);
+
+            // Retrieve status colors for badges
+            const getStatusColor = (status, type) => {
+                const isFacade = type === 'Facade';
+                if (isFacade) {
+                    switch (status) {
+                        case 'Crack': return 'bg-red-50 text-red-600 border-red-200';
+                        case 'Spall': return 'bg-orange-50 text-orange-600 border-orange-200';
+                        case 'Corrosion': return 'bg-amber-50 text-amber-700 border-amber-200';
+                        case 'Section Loss': return 'bg-yellow-50 text-yellow-700 border-yellow-200';
+                        case 'Missing': return 'bg-gray-50 text-gray-600 border-gray-200';
+                        case 'Embedment': return 'bg-blue-50 text-blue-600 border-blue-200';
+                        case 'Other': return 'bg-purple-50 text-purple-600 border-purple-200';
+                        default: return 'bg-gray-50 text-gray-600 border-gray-200';
+                    }
+                } else {
+                    switch (status) {
+                        case 'Defect': return 'bg-red-100 text-red-800 border-red-200';
+                        case 'Reference': return 'bg-blue-100 text-blue-800 border-blue-200';
+                        case 'Discussion': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+                        case 'RFI': return 'bg-orange-100 text-orange-800 border-orange-200';
+                        case 'Progress': return 'bg-green-100 text-green-800 border-green-200';
+                        default: return 'bg-gray-100 text-gray-800 border-gray-200';
+                    }
+                }
+            };
+
+            return (
+                <div
+                    ref={sidebarRef}
+                    className={`
+                        fixed inset-y-0 left-0 z-30 bg-white dark:bg-gray-900 shadow-2xl transform transition-transform duration-300 ease-in-out flex flex-col border-r dark:border-gray-800
+                        ${isOpen ? 'translate-x-0' : '-translate-x-full'}
+                        md:relative md:shadow-none ${!isOpen && 'md:hidden'}
+                    `}
+                    style={{ width: isOpen ? (window.innerWidth >= 768 ? width : '100%') : 0 }}
+                >
+                    <div className="h-16 border-b dark:border-gray-800 flex items-center justify-between px-4 bg-gray-50 dark:bg-gray-900 shrink-0">
+                        <h3 className="font-bold text-gray-800 dark:text-white">Observations ({observations.length})</h3>
+                        <button onClick={onClose} className="md:hidden p-2 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-full dark:text-white"><X size={20} /></button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                        {observations.length === 0 ? (
+                            <div className="text-center text-gray-400 py-10 text-sm">No observations yet. Click on the plan to add one.</div>
+                        ) : (
+                            observations.map(obs => (
+                                <div
+                                    key={obs.id}
+                                    onClick={() => onSelectObservation(obs)}
+                                    className={`
+                                        p-3 rounded-lg border border-gray-200 dark:border-gray-700 cursor-pointer hover:border-black dark:hover:border-white transition-all
+                                        ${selectedPinId === obs.id ? 'ring-2 ring-black dark:ring-white border-transparent bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'}
+                                    `}
+                                >
+                                    <div className="flex justify-between items-start mb-2">
+                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${getStatusColor(obs.status, obs.type)}`}>
+                                            {obs.status}
+                                        </span>
+                                        <span className="text-xs text-gray-400 font-mono">#{obs.number}</span>
+                                    </div>
+                                    <h4 className="font-bold text-sm text-gray-800 dark:text-gray-200 mb-1 line-clamp-1">{obs.title || "Untitled"}</h4>
+                                    <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2 mb-2">{obs.description || "No description."}</p>
+
+                                    <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
+                                        <div className="text-[10px] text-gray-400">Page {obs.page}</div>
+                                        {obs.image && <div className="text-[10px] text-blue-500 font-medium flex items-center"><ImageIcon size={10} className="mr-1" /> Photo</div>}
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+
+                    {/* Drag Handle (Desktop Only) */}
+                    <div
+                        className="hidden md:block absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 transition-colors z-40"
+                        onMouseDown={startResizing}
+                    />
+                </div>
+            );
+        };
 
         // --- HOOKS ---
         const useDarkMode = () => {
@@ -1136,12 +1581,20 @@
 
             // UI State
             const [selectedPinId, setSelectedPinId] = useState(null);
-            const [markupImage, setMarkupImage] = useState(null);
+            const [markupImage, setMarkupImage] = useState(null); // Used for both layers: background or direct image
+            const [markupBackground, setMarkupBackground] = useState(null); // New: for underlying plan capability
+            const [markupTarget, setMarkupTarget] = useState('image'); // 'image' or 'planMarkup'
             const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
             const [isReportModalOpen, setIsReportModalOpen] = useState(false);
             const [isInfoModalOpen, setIsInfoModalOpen] = useState(false);
             // New Plan Modal State
             const [isAddPlanModalOpen, setIsAddPlanModalOpen] = useState(false);
+
+            // Side Panel State
+            const [isSidePanelOpen, setIsSidePanelOpen] = useState(true); // Default open on desktop logic can be refined
+
+            // Drawing Mode State (Refactored from PhotoEditor)
+            const [isDrawingMode, setIsDrawingMode] = useState(false);
 
             // Delete Confirmation State
             const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
@@ -1432,6 +1885,21 @@
                 updateReportObservations(updatedObsList);
             };
 
+            const handlePlanMarkup = async () => {
+                if (!activeObservation) { alert("No active observation"); return; }
+                if (!activePlan) { alert("No active plan"); return; }
+
+                // Enable Drawing Mode in PlanViewer
+                setIsDrawingMode(true);
+                // We no longer need to load background here as PlanViewer handles it naturally.
+                // We just need to ensure the correct page is shown (which it should be).
+            };
+
+            const handleMovePin = (pinId, x, y) => {
+                const updatedObsList = activeReport.observations.map(o => o.id === pinId ? { ...o, x, y } : o);
+                updateReportObservations(updatedObsList);
+            };
+
             const updateReportMeta = async (field, value) => {
                 if (field === 'get_weather') {
                     const weather = await fetchWeather(activeProject.address);
@@ -1451,17 +1919,31 @@
                 const file = e.target.files[0];
                 if (file) {
                     const reader = new FileReader();
-                    reader.onload = (ev) => updateObservation('image', ev.target.result);
+                    reader.onload = (ev) => {
+                        updateObservation('image', ev.target.result);
+                    };
                     reader.readAsDataURL(file);
                 }
             };
-            const handleMarkupSave = (newImageData) => {
-                updateObservation('image', newImageData);
-                setMarkupImage(null);
+
+            const handleMarkup = () => {
+                if (activeObservation.image) {
+                    setMarkupImage(activeObservation.image);
+                    setMarkupBackground(null);
+                    setMarkupTarget('image');
+                }
             };
 
-            // --- EXPORT LOGIC ---
-            // Helper to render specific PDF page to canvas
+            const handleMarkupSave = (newImageData) => {
+                if (markupTarget === 'planMarkup') {
+                    updateObservation('planMarkup', newImageData);
+                } else {
+                    updateObservation('image', newImageData);
+                }
+                setMarkupImage(null);
+                setMarkupBackground(null);
+            };
+
             // --- EXPORT LOGIC ---
             // Helper to render specific PDF page to canvas
             const generatePageImage = async (plan, pageNum) => {
@@ -1541,6 +2023,23 @@
 
                     return isMatch && (o.page || 1) === pageNum;
                 });
+
+                // Draw Markups (Linework) - Layer 2
+                // We must draw these before pins so pins are on top.
+                // Since loading images is async, we iterate sequentially or promise.all
+                const markups = pins.filter(p => p.planMarkup);
+                if (markups.length > 0) {
+                    await Promise.all(markups.map(m => new Promise((resolve) => {
+                        const img = new Image();
+                        img.onload = () => {
+                            ctx.drawImage(img, 0, 0, width, height);
+                            resolve();
+                        };
+                        img.onerror = () => resolve();
+                        img.crossOrigin = "anonymous";
+                        img.src = m.planMarkup;
+                    })));
+                }
 
                 pins.forEach(pin => {
                     const px = (pin.x / 100) * width;
@@ -2068,7 +2567,17 @@
             return (
                 <div className="h-screen flex flex-col bg-white dark:bg-gray-950 overflow-hidden transition-colors">
                     <input type="file" accept="image/*" capture="environment" ref={fileInputRef} onChange={handlePhotoUpload} className="hidden" />
-                    {markupImage && <PhotoEditor imageSrc={markupImage} onSave={handleMarkupSave} onCancel={() => setMarkupImage(null)} />}
+                    {(markupImage || markupBackground) && (
+                        <PhotoEditor
+                            imageSrc={markupImage}
+                            backgroundImageSrc={markupBackground}
+                            onSave={handleMarkupSave}
+                            onCancel={() => {
+                                setMarkupImage(null);
+                                setMarkupBackground(null);
+                            }}
+                        />
+                    )}
                     <ReportInfoModal isOpen={isInfoModalOpen} onClose={() => setIsInfoModalOpen(false)} report={activeReport} onUpdate={updateReportMeta} pinScale={pinScale} onUpdatePinScale={setPinScale} />
 
                     <Modal isOpen={isAddPlanModalOpen} onClose={() => setIsAddPlanModalOpen(false)} title="Add Plan to Project">
@@ -2088,6 +2597,15 @@
                                 updateReport(activeReport); // Just to be sure
                                 setView('project_detail');
                             }} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg text-gray-600 dark:text-gray-300"><ChevronLeft size={24} /></button>
+
+                            {/* Toggle Sidebar Button */}
+                            <button
+                                onClick={() => setIsSidePanelOpen(!isSidePanelOpen)}
+                                className={`p-2 rounded-lg transition-colors ${isSidePanelOpen ? 'bg-black text-white dark:bg-white dark:text-black' : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-300'}`}
+                                title="Toggle List"
+                            >
+                                <List size={20} />
+                            </button>
                             <div className="flex flex-col">
                                 <h1 className="font-bold leading-tight truncate max-w-[150px] md:max-w-xs dark:text-white">{activeReport.name}</h1>
 
@@ -2114,8 +2632,8 @@
                             </div>
                         </div>
 
-                        {/* Mode Toggle */}
-                        <div className="flex items-center bg-gray-100 dark:bg-gray-800 p-1 rounded-lg mx-4">
+                        {/* Mode Toggle (Responsive) */}
+                        <div className="hidden md:flex items-center bg-gray-100 dark:bg-gray-800 p-1 rounded-lg mx-4">
                             <button
                                 onClick={() => setObservationMode('CA')}
                                 className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${observationMode === 'CA' ? 'bg-white dark:bg-gray-600 shadow text-black dark:text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'}`}
@@ -2129,6 +2647,13 @@
                                 Facade
                             </button>
                         </div>
+                        {/* Mobile Toggle Button */}
+                        <button
+                            onClick={() => setObservationMode(observationMode === 'CA' ? 'Facade' : 'CA')}
+                            className="md:hidden mx-2 px-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs font-bold text-gray-900 dark:text-white border border-gray-200 dark:border-gray-700 shadow-sm transition-colors hover:bg-gray-200 dark:hover:bg-gray-700"
+                        >
+                            {observationMode}
+                        </button>
 
                         <div className="flex items-center space-x-2">
                             <button onClick={() => setIsInfoModalOpen(true)} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full text-gray-600 dark:text-gray-300"><Info size={20} title="Report Details / Set Weather" /></button>
@@ -2139,7 +2664,6 @@
                                     className="flex items-center space-x-2 px-4 py-2 bg-black dark:bg-white hover:bg-gray-800 dark:hover:bg-gray-200 text-white dark:text-black rounded-lg text-sm font-medium transition-colors shadow-sm"
                                 >
                                     <Download size={18} />
-                                    <span className="hidden sm:inline">Export</span>
                                     <ChevronDown size={14} />
                                 </button>
 
@@ -2182,39 +2706,81 @@
                                 )}
                             </div>
                         </div>
-                    </header>
-                    <div className="flex-1 relative overflow-hidden">
-                        {activePlan ? (
-                            <PlanViewer
-                                planId={activePlan.id}
-                                planType={activePlan.type}
-                                totalPages={activePlan.pages || 1}
-                                currentPage={currentPage}
-                                onPageChange={setCurrentPage}
-                                pins={activeReport.observations.filter(p => !p.planId || p.planId === activePlanId)}
-                                onAddPin={handleAddPin}
-                                onSelectPin={setSelectedPinId}
-                                selectedPinId={selectedPinId}
-                                planScale={activePlan.scale}
-                                onUpdateScale={async (newScale) => {
-                                    const updatedPlan = { ...activePlan, scale: newScale };
-                                    const updatedProj = {
-                                        ...activeProject,
-                                        plans: activeProject.plans.map(p => p.id === activePlan.id ? updatedPlan : p)
-                                    };
-                                    // Update state and DB (Plan only)
-                                    const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
-                                    setProjects(updatedList);
-                                    await db.plans.put({ ...updatedPlan, projectId: activeProjectId });
-                                }}
-                                pinScale={pinScale}
-                            />
-                        ) : (
-                            <div className="flex items-center justify-center h-full text-gray-400">No Plan Selected</div>
-                        )}
-                        <ObservationDrawer isOpen={!!selectedPinId} observation={activeObservation} onClose={() => setSelectedPinId(null)} onChange={updateObservation} onTakePhoto={triggerCamera} onRemove={removeObservation} onMarkup={() => activeObservation.image && setMarkupImage(activeObservation.image)} />
+                    </header >
+                    <div className="flex-1 relative overflow-hidden flex">
+                        <ObservationListPanel
+                            isOpen={isSidePanelOpen}
+                            onClose={() => setIsSidePanelOpen(false)}
+                            observations={activeReport.observations}
+                            onSelectObservation={(obs) => {
+                                setSelectedPinId(obs.id);
+                                // Logic to change plan/page if needed
+                                if (obs.planId && obs.planId !== activePlanId) {
+                                    setActivePlanId(obs.planId);
+                                }
+                                if (obs.page && obs.page !== currentPage) {
+                                    setCurrentPage(obs.page);
+                                }
+                                // On Mobile auto-close panel? Maybe not, user can close.
+                                if (window.innerWidth < 768) setIsSidePanelOpen(false);
+                            }}
+                            selectedPinId={selectedPinId}
+                        />
+                        <ObservationDrawer
+                            isOpen={!!selectedPinId}
+                            observation={activeObservation}
+                            onClose={() => setSelectedPinId(null)}
+                            onChange={(field, value) => updateObservation(field, value)}
+                            onTakePhoto={triggerCamera}
+                            onRemove={removeObservation}
+                            onMarkup={handleMarkup}
+                            onStartDrawing={() => {
+                                console.log("onStartDrawing called from App");
+                                if (handlePlanMarkup) handlePlanMarkup();
+                                else alert("handlePlanMarkup is undefined in App!");
+                            }}
+                        />
+                        <div className="flex-1 relative">
+                            {activePlan ? (
+                                <PlanViewer
+                                    planId={activePlan.id}
+                                    planType={activePlan.type}
+                                    totalPages={activePlan.pages || 1}
+                                    currentPage={currentPage}
+                                    onPageChange={setCurrentPage}
+                                    pins={activeReport.observations.filter(p => !p.planId || p.planId === activePlanId)}
+                                    onAddPin={handleAddPin}
+                                    onSelectPin={setSelectedPinId}
+                                    onMovePin={handleMovePin}
+                                    selectedPinId={selectedPinId}
+                                    planScale={activePlan.scale}
+                                    onUpdateScale={async (newScale) => {
+                                        const updatedPlan = { ...activePlan, scale: newScale };
+                                        const updatedProj = {
+                                            ...activeProject,
+                                            plans: activeProject.plans.map(p => p.id === activePlan.id ? updatedPlan : p)
+                                        };
+                                        // Update state and DB (Plan only)
+                                        const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
+                                        setProjects(updatedList);
+                                        await db.plans.put({ ...updatedPlan, projectId: activeProjectId });
+                                    }}
+                                    pinScale={pinScale}
+                                    isDrawingMode={isDrawingMode}
+                                    initialMarkup={activeObservation && activeObservation.planMarkup}
+                                    onSaveMarkup={(data) => {
+                                        updateObservation('planMarkup', data);
+                                        setIsDrawingMode(false);
+                                    }}
+                                    onCancelMarkup={() => setIsDrawingMode(false)}
+                                />
+                            ) : (
+                                <div className="flex items-center justify-center h-full text-gray-400">No Plan Selected</div>
+                            )}
+
+                        </div>
                     </div>
-                </div>
+                </div >
             );
         };
 
@@ -2224,4 +2790,3 @@
 </body>
 
 </html>
-
