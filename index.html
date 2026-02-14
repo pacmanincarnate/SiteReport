@@ -867,7 +867,7 @@
             return (
                 <div className="relative w-full h-full bg-gray-100 dark:bg-gray-900 overflow-hidden flex flex-col transition-colors">
                     {/* Unified Bottom Controls */}
-                    <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-10 flex items-center space-x-2 md:space-x-4 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm p-1.5 md:p-2 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 transition-all hover:bg-white dark:hover:bg-gray-800 max-w-[95vw] w-max">
+                    <div className="fixed lg:absolute bottom-8 left-1/2 -translate-x-1/2 z-40 flex items-center space-x-2 md:space-x-4 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm p-1.5 md:p-2 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 transition-all hover:bg-white dark:hover:bg-gray-800 max-w-[95vw] w-max">
                         {/* Mode Toggles */}
                         <div className="flex items-center space-x-1 border-r border-gray-200 dark:border-gray-700 pr-3">
                             <button onClick={() => { setMode(mode === 'view' ? 'calibrate' : 'view'); setP1(null); setMeasureResult(null); }}
@@ -1070,7 +1070,7 @@
             const statuses = isFacade ? facadeStatuses : caStatuses;
 
             return (
-                <div className="absolute inset-y-0 right-0 w-full md:w-96 bg-white dark:bg-gray-900 shadow-2xl z-20 transform transition-transform duration-300 ease-in-out flex flex-col border-l dark:border-gray-800">
+                <div className="absolute inset-y-0 right-0 w-full md:w-96 bg-white dark:bg-gray-900 shadow-2xl z-50 transform transition-transform duration-300 ease-in-out flex flex-col border-l dark:border-gray-800">
                     <div className="h-16 border-b dark:border-gray-800 flex items-center justify-between px-6 bg-gray-50 dark:bg-gray-900 shrink-0 transition-colors">
                         <h3 className="font-bold text-gray-800 dark:text-white">{isFacade ? "Observation" : `Observation #${observation.number}`}</h3>
                         <button onClick={onClose} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-full dark:text-white"><X size={20} /></button>
@@ -1173,16 +1173,20 @@
                         </div>
                         <div className="text-xs text-gray-400 pt-4 border-t dark:border-gray-800">Created: {new Date(observation.createdAt).toLocaleString()}</div>
                     </div>
-                    <div className="p-4 border-t dark:border-gray-800 bg-gray-50 dark:bg-gray-900 flex justify-between shrink-0 transition-colors">
-                        <button onClick={onRemove} className="text-red-500 text-sm font-medium hover:underline">Delete</button>
-                        <div className="flex space-x-3">
+                    <div className="p-4 border-t dark:border-gray-800 bg-gray-50 dark:bg-gray-900 flex items-center justify-between shrink-0 transition-colors">
+                        <div className="flex-1">
+                            <button onClick={onRemove} className="text-red-500 text-sm font-medium hover:underline">Delete</button>
+                        </div>
+                        <div className="flex justify-center flex-1">
                             <button
                                 onClick={onStartDrawing}
-                                className="bg-gray-200 dark:bg-gray-700 p-2 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                                className="bg-gray-200 dark:bg-gray-700 w-16 py-2 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors flex items-center justify-center"
                                 title="Draw on Plan"
                             >
                                 <PenTool size={20} className="text-gray-700 dark:text-gray-200" />
                             </button>
+                        </div>
+                        <div className="flex-1 flex justify-end">
                             <button onClick={onClose} className="bg-black dark:bg-white text-white dark:text-black px-6 py-2 rounded-lg text-sm font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition-colors">Done</button>
                         </div>
                     </div>
@@ -1334,15 +1338,15 @@
                 <div
                     ref={sidebarRef}
                     className={`
-                        fixed inset-y-0 left-0 z-30 bg-white dark:bg-gray-900 shadow-2xl transform transition-transform duration-300 ease-in-out flex flex-col border-r dark:border-gray-800 overflow-hidden
+                        fixed inset-y-0 left-0 z-50 bg-white dark:bg-gray-900 shadow-2xl transform transition-transform duration-300 ease-in-out flex flex-col border-r dark:border-gray-800 overflow-hidden
                         ${isOpen ? 'translate-x-0' : '-translate-x-full'}
-                        md:relative md:shadow-none ${!isOpen && 'md:hidden'}
+                        lg:relative lg:shadow-none ${!isOpen && 'lg:hidden'}
                     `}
-                    style={{ width: isOpen ? (window.innerWidth >= 768 ? width : '100%') : 0 }}
+                    style={{ width: isOpen ? (window.innerWidth >= 1024 ? width : '100%') : 0 }}
                 >
                     <div className="h-16 border-b dark:border-gray-800 flex items-center justify-between px-4 bg-gray-50 dark:bg-gray-900 shrink-0">
                         <h3 className="font-bold text-gray-800 dark:text-white">Observations ({observations.length})</h3>
-                        <button onClick={onClose} className="md:hidden p-2 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-full dark:text-white"><X size={20} /></button>
+                        <button onClick={onClose} className="lg:hidden p-2 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-full dark:text-white"><X size={20} /></button>
                     </div>
                     <div className="flex-1 overflow-y-auto p-4 space-y-3">
                         {observations.length === 0 ? (
@@ -1377,7 +1381,7 @@
 
                     {/* Drag Handle (Desktop Only) */}
                     <div
-                        className="hidden md:block absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 transition-colors z-40"
+                        className="hidden lg:block absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 transition-colors z-40"
                         onMouseDown={startResizing}
                     />
                 </div>
@@ -1559,7 +1563,7 @@
             const [isAddPlanModalOpen, setIsAddPlanModalOpen] = useState(false);
 
             // Side Panel State
-            const [isSidePanelOpen, setIsSidePanelOpen] = useState(window.innerWidth >= 768);
+            const [isSidePanelOpen, setIsSidePanelOpen] = useState(window.innerWidth >= 1024);
 
             // Drawing Mode State (Refactored from PhotoEditor)
             const [isDrawingMode, setIsDrawingMode] = useState(false);
@@ -2569,7 +2573,7 @@
 
                                 <div className="flex items-center space-x-3 md:space-x-6">
                                     <div className="flex items-center space-x-1 md:space-x-2 border-r dark:border-gray-700 pr-4">
-                                        {['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#000000', '#ffffff'].map(c => (
+                                        {['#ef4444', '#f59e0b', '#10b981', '#3b82f6'].map(c => (
                                             <button
                                                 key={c}
                                                 onClick={() => setDrawingColor(c)}
