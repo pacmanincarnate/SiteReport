@@ -122,13 +122,117 @@
         // Default plan is a simple image
         const DEMO_PLAN_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9a/Sample_Floorplan.jpg/1200px-Sample_Floorplan.jpg";
 
+        const dataURLtoBlob = (dataurl) => {
+            if (!dataurl) return null;
+            const arr = dataurl.split(',');
+            const mime = arr[0].match(/:(.*?);/)[1];
+            const bstr = atob(arr[1]);
+            let n = bstr.length;
+            const u8arr = new Uint8Array(n);
+            while (n--) u8arr[n] = bstr.charCodeAt(n);
+            return new Blob([u8arr], { type: mime });
+        };
+
+        const blobToDataURL = (blob) => {
+            if (!blob) return Promise.resolve(null);
+            if (typeof blob === 'string') return Promise.resolve(blob);
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+        };
+
+        const getZipData = (data) => {
+            if (!data) return null;
+            if (typeof data === 'string') {
+                return dataURLtoBlob(data);
+            }
+            return data;
+        };
+
         // --- DATABASE ---
         const db = new Dexie('SiteVisitsDB');
-        db.version(3).stores({
-            projects: 'id, name',
-            plans: 'id, projectId',
-            planPages: '[planId+pageIndex], planId' // Compound index for efficient page retrieval
+        // v4: Photos and plan markup drawings now live in dedicated tables rather than
+        // being embedded inside the project JSON blob. This prevents record-size overflow
+        // when a report accumulates many issues with photos.
+        db.version(4).stores({
+            projects:           'id, name',
+            plans:              'id, projectId',
+            planPages:          '[planId+pageIndex], planId',  // PDF page rasters
+            observationPhotos:  'observationId',               // one photo per observation
+            observationMarkups: 'observationId'                // one plan-markup drawing per observation
         });
+
+        // --- DATA ACCESS LAYER ---
+        // All binary media read/write is routed through these helpers.
+        // The rest of the app never touches the media tables directly.
+
+        const db_savePhoto = (observationId, data) => {
+            if (!data) return db.observationPhotos.delete(observationId);
+            const blob = typeof data === 'string' && data.startsWith('data:') ? dataURLtoBlob(data) : data;
+            return db.observationPhotos.put({ observationId, data: blob });
+        };
+
+        const db_loadPhoto = async (observationId) => {
+            const rec = await db.observationPhotos.get(observationId);
+            return rec ? rec.data : null;
+        };
+
+        const db_saveMarkup = (observationId, data) => {
+            if (!data) return db.observationMarkups.delete(observationId);
+            const blob = typeof data === 'string' && data.startsWith('data:') ? dataURLtoBlob(data) : data;
+            return db.observationMarkups.put({ observationId, data: blob });
+        };
+
+        const db_loadMarkup = async (observationId) => {
+            const rec = await db.observationMarkups.get(observationId);
+            return rec ? rec.data : null;
+        };
+
+        const db_deleteObservationMedia = (observationId) =>
+            Promise.all([
+                db.observationPhotos.delete(observationId),
+                db.observationMarkups.delete(observationId)
+            ]);
+
+        // Strip binary fields before persisting observations inside the projects table.
+        // Observations only carry lightweight flags (hasPhoto, hasMarkup) in the DB.
+        const stripObservationMedia = (observations) =>
+            observations.map(({ image, planMarkup, ...rest }) => rest);
+
+        // Wraps a DB write, surfaces any failure as a user-visible banner, and
+        // returns { ok: boolean } so callers can bail out cleanly.
+        const withDbWrite = async (operation, setDbError) => {
+            try {
+                await operation();
+                return { ok: true };
+            } catch (err) {
+                console.error('DB write failed:', err);
+                if (setDbError)
+                    setDbError('\u26a0\ufe0f Save failed \u2014 your data may not be persisted. Please export your work.');
+                return { ok: false, error: err };
+            }
+        };
+
+        // Reads the browser storage quota and surfaces a warning banner when the
+        // app is approaching its limit.
+        const checkStorageQuota = async (setStorageWarning) => {
+            if (!navigator.storage || !navigator.storage.estimate) return;
+            try {
+                const { usage, quota } = await navigator.storage.estimate();
+                const pct = quota > 0 ? (usage / quota) * 100 : 0;
+                const usedMB = (usage / 1048576).toFixed(0);
+                const quotaMB = (quota / 1048576).toFixed(0);
+                if (pct > 85)
+                    setStorageWarning(`Storage critically full (${pct.toFixed(0)}% \u2014 ${usedMB}\u202fMB / ${quotaMB}\u202fMB). Export your data immediately.`);
+                else if (pct > 65)
+                    setStorageWarning(`Storage ${pct.toFixed(0)}% full (${usedMB}\u202fMB / ${quotaMB}\u202fMB). Consider exporting soon.`);
+                else
+                    setStorageWarning(null);
+            } catch (e) { /* estimate not available in this context */ }
+        };
 
         // --- API HELPERS ---
         const fetchWeather = async (address) => {
@@ -230,13 +334,13 @@
                                 }
                                 ctx.putImageData(imgData, 0, 0);
 
-                                const imgUrl = canvas.toDataURL('image/jpeg', 0.8);
+                                const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
 
                                 // SAVE IMMEDIATELY TO DB
                                 await db.planPages.put({
                                     planId: tempPlanId,
                                     pageIndex: i - 1, // 0-indexed
-                                    data: imgUrl
+                                    data: blob
                                 });
 
                                 // Free memory
@@ -257,12 +361,8 @@
                     bufferReader.readAsArrayBuffer(selectedFile);
                 } else {
                     // It's an image
-                    const fileReader = new FileReader();
-                    fileReader.onload = (ev) => {
-                        onPlanSelected(ev.target.result, 'image', 1);
-                        setLoading(false);
-                    };
-                    fileReader.readAsDataURL(selectedFile);
+                    onPlanSelected(selectedFile, 'image', 1);
+                    setLoading(false);
                 }
             };
 
@@ -530,19 +630,28 @@
             const [pageLoading, setPageLoading] = useState(false);
 
             useEffect(() => {
+                let cancelled = false;
+                let objectUrl = null;
+
                 const fetchPage = async () => {
                     if (!planId) return;
                     setPageLoading(true);
-                    setCurrentImageSrc(null);
                     try {
                         // Fetch from DB
                         const index = (planType === 'image') ? 0 : (currentPage - 1);
-                        const pageRec = await db.planPages.get({ planId: planId, pageIndex: index });
+                        const pageRec = await db.planPages.get([planId, index]);
 
-                        if (pageRec) {
-                            setCurrentImageSrc(pageRec.data);
-                        } else {
-                            // No page record found
+                        if (!cancelled) {
+                            if (pageRec) {
+                                if (typeof pageRec.data === 'string') {
+                                    setCurrentImageSrc(pageRec.data);
+                                } else if (pageRec.data instanceof Blob) {
+                                    objectUrl = URL.createObjectURL(pageRec.data);
+                                    setCurrentImageSrc(objectUrl);
+                                }
+                            } else {
+                                setCurrentImageSrc(null);
+                            }
                         }
                     } catch (e) {
                         console.error("Failed to load page image", e);
@@ -550,14 +659,60 @@
                     setPageLoading(false);
                 };
                 fetchPage();
+
+                return () => {
+                    cancelled = true;
+                    if (objectUrl) {
+                        URL.revokeObjectURL(objectUrl);
+                    }
+                };
             }, [planId, currentPage, planType]);
 
 
             // Reset tools when page changes
-            // Reset tools when page changes
             useEffect(() => {
                 setMode('view'); setP1(null); setP2(null); setTempP2(null); setMeasureResult(null);
             }, [currentPage, planId]);
+
+            // Page Markups State (loads drawing overlays from DB on-demand)
+            const [pageMarkups, setPageMarkups] = useState({});
+            useEffect(() => {
+                let cancelled = false;
+                const activeUrls = [];
+
+                const loadMarkups = async () => {
+                    const markupsMap = {};
+                    const pinsWithMarkup = pins.filter(p => (p.page || 1) === currentPage && p.hasMarkup);
+                    if (pinsWithMarkup.length > 0) {
+                        await Promise.all(pinsWithMarkup.map(async (pin) => {
+                            try {
+                                const data = await db_loadMarkup(pin.id);
+                                if (data && !cancelled) {
+                                    if (typeof data === 'string') {
+                                        markupsMap[pin.id] = data;
+                                    } else if (data instanceof Blob) {
+                                        const url = URL.createObjectURL(data);
+                                        activeUrls.push(url);
+                                        markupsMap[pin.id] = url;
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('Failed to load markup for pin', pin.id, e);
+                            }
+                        }));
+                    }
+                    if (!cancelled) {
+                        setPageMarkups(markupsMap);
+                    } else {
+                        activeUrls.forEach(url => URL.revokeObjectURL(url));
+                    }
+                };
+                loadMarkups();
+                return () => {
+                    cancelled = true;
+                    activeUrls.forEach(url => URL.revokeObjectURL(url));
+                };
+            }, [pins, currentPage]);
 
             // Initialize Drawing Canvas
             useEffect(() => {
@@ -862,7 +1017,7 @@
             const visiblePins = pins.filter(p => (p.page || 1) === currentPage);
 
             // Filter markups for this page
-            const visibleMarkups = pins.filter(p => (p.page || 1) === currentPage && p.planMarkup);
+            const visibleMarkups = pins.filter(p => (p.page || 1) === currentPage && p.hasMarkup && pageMarkups[p.id]);
 
             return (
                 <div className="relative w-full h-full bg-gray-100 dark:bg-gray-900 overflow-hidden flex flex-col transition-colors">
@@ -943,7 +1098,7 @@
                                     {visibleMarkups.map(markup => (
                                         <img
                                             key={`markup-${markup.id}`}
-                                            src={markup.planMarkup}
+                                            src={pageMarkups[markup.id]}
                                             className="absolute inset-0 pointer-events-none select-none"
                                             style={{ width: '100%', height: '100%', zIndex: 5 }}
                                         />
@@ -951,7 +1106,9 @@
                                 </>
                             ) : (
                                 <div style={{ width: 1000, height: 700 }} className="absolute inset-0 bg-white flex items-center justify-center flex-col z-20 pointer-events-none">
-                                    <div className="text-gray-400 font-medium">No Plan Loaded</div>
+                                    <div className="text-gray-400 font-medium text-center px-4">
+                                        {planId ? "Plan images not loaded in storage. You can re-upload plan or restore backup." : "No Plan Loaded"}
+                                    </div>
                                 </div>
                             )}
 
@@ -1409,7 +1566,7 @@
 
                                     <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
                                         <div className="text-[10px] text-gray-400">Page {obs.page}</div>
-                                        {obs.image && <div className="text-[10px] text-blue-500 font-medium flex items-center"><ImageIcon size={10} className="mr-1" /> Photo</div>}
+                                        {obs.hasPhoto && <div className="text-[10px] text-blue-500 font-medium flex items-center"><ImageIcon size={10} className="mr-1" /> Photo</div>}
                                     </div>
                                 </div>
                             ))
@@ -1491,102 +1648,138 @@
             ]);
             const [loading, setLoading] = useState(true);
 
-            // Load from DB
+            // Load from DB and run all pending migrations on startup
             useEffect(() => {
                 const loadData = async () => {
                     try {
+                        // Request persistent storage
+                        if (navigator.storage && navigator.storage.persist) {
+                            const persisted = await navigator.storage.persist();
+                            console.log(`Persistent storage granted: ${persisted}`);
+                        }
                         let projs = await db.projects.toArray();
                         if (projs.length === 0) {
-                            // Migrate or Init Demo
+                            // First run: seed the demo project
                             const demoProj = projects[0];
-                            // Extract Plans for Demo
                             const demoPlans = demoProj.plans.map(p => ({ ...p, projectId: demoProj.id }));
-                            const demoProjClean = { ...demoProj, plans: [] }; // Don't verify plans in project object anymore
-
+                            const demoProjClean = { ...demoProj, plans: [] };
                             await db.projects.add(demoProjClean);
-
                             const demoPlan = demoPlans[0];
-                            await db.plans.add({ ...demoPlan, data: null }); // Clear data
+                            await db.plans.add({ ...demoPlan, data: null });
                             await db.planPages.put({ planId: demoPlan.id, pageIndex: 0, data: demoPlan.data });
-
-                            // Reload fully
                             projs = [demoProjClean];
                         }
 
-                        // MIGRATION: Check for legacy plans with data in 'plans' table and move to 'planPages'
+                        // -- Migration 1 (v3): plan.data inline blobs -> planPages table
                         const allPlans = await db.plans.toArray();
-                        let migrationCount = 0;
-
+                        let planMigCount = 0;
                         for (const plan of allPlans) {
                             if (plan.data) {
-                                // Legacy Data found
                                 if (Array.isArray(plan.data)) {
-                                    // Raster PDF or multi-page image
-                                    const pages = plan.data.map((imgData, index) => ({
-                                        planId: plan.id,
-                                        pageIndex: index,
-                                        data: imgData
-                                    }));
-                                    await db.planPages.bulkPut(pages);
+                                    await db.planPages.bulkPut(
+                                        plan.data.map((imgData, index) => ({ planId: plan.id, pageIndex: index, data: imgData }))
+                                    );
                                 } else if (typeof plan.data === 'string') {
-                                    // Single image or legacy PDF string
-                                    // If it's a legacy PDF string (starts with data:application/pdf), we might want to warn or just leave it?
-                                    // The user said "Old PDF plans will no longer work heavily". 
-                                    // But let's migrate single images.
                                     await db.planPages.put({ planId: plan.id, pageIndex: 0, data: plan.data });
                                 }
-
-                                // Clear data from plan record to free memory
                                 await db.plans.update(plan.id, { data: null });
-                                migrationCount++;
+                                planMigCount++;
                             }
                         }
+                        if (planMigCount > 0)
+                            console.log(`[Migration v3] Moved ${planMigCount} plan(s) to planPages table.`);
 
-                        if (migrationCount > 0) {
-                            console.log(`Migrated ${migrationCount} plans to new schema.`);
+                        // -- Migration 2 (v4): inline observation media -> dedicated tables
+                        // Observations used to embed image/planMarkup as base64 strings directly
+                        // inside the projects JSON blob. This migration extracts them into the
+                        // new observationPhotos / observationMarkups tables so the project record
+                        // stays small regardless of how many photos are attached.
+                        let mediaMigCount = 0;
+                        const migratedProjs = [];
+                        for (const proj of projs) {
+                            let projChanged = false;
+                            const migratedReports = (proj.reports || []).map(report => {
+                                let reportChanged = false;
+                                const migratedObs = (report.observations || []).map(obs => {
+                                    const cleaned = { ...obs };
+                                    if (obs.image) {
+                                        db.observationPhotos.put({ observationId: obs.id, data: obs.image }).catch(console.error);
+                                        delete cleaned.image;
+                                        cleaned.hasPhoto = true;
+                                        reportChanged = true;
+                                        mediaMigCount++;
+                                    }
+                                    if (obs.planMarkup) {
+                                        db.observationMarkups.put({ observationId: obs.id, data: obs.planMarkup }).catch(console.error);
+                                        delete cleaned.planMarkup;
+                                        cleaned.hasMarkup = true;
+                                        reportChanged = true;
+                                        mediaMigCount++;
+                                    }
+                                    return cleaned;
+                                });
+                                if (reportChanged) projChanged = true;
+                                return reportChanged ? { ...report, observations: migratedObs } : report;
+                            });
+                            const finalProj = projChanged ? { ...proj, reports: migratedReports } : proj;
+                            if (projChanged) {
+                                const { plans: _ignored, ...projData } = finalProj;
+                                await db.projects.put(projData).catch(console.error);
+                            }
+                            migratedProjs.push(finalProj);
                         }
+                        if (mediaMigCount > 0)
+                            console.log(`[Migration v4] Extracted ${mediaMigCount} media item(s) from observation records.`);
 
-                        // Reload plans after migration (now light-weight)
+                        // Hydrate lightweight plan metadata into each project object
                         const hydratedPlans = await db.plans.toArray();
-
-                        // Attach plans to projects in memory
-                        const hydratedProjects = projs.map(p => ({
+                        const hydratedProjects = migratedProjs.map(p => ({
                             ...p,
                             plans: hydratedPlans.filter(plan => plan.projectId === p.id)
                         }));
 
                         setProjects(hydratedProjects);
                         setLoading(false);
+                        checkStorageQuota(setStorageWarning);
                     } catch (e) {
-                        console.error("DB Load Error", e);
+                        console.error('DB Load Error', e);
+                        setDbError('Failed to load data from storage. Try reloading the page.');
                         setLoading(false);
                     }
                 };
                 loadData();
             }, []);
 
-            // Save Helper (updates both state and DB)
-            const saveProjectState = async (newProjects) => {
-                setProjects(newProjects);
-                // For updates to reports/metadata, we just put the project object (minus plans, ideally)
-                // But since we hydrated plans into memory, we need to STRIP plans before saving project to DB
-                // AND save any modified plans if they changed.
-                // Assuming this function is mostly for project metadata/reports updates:
-                const projectToSave = newProjects.find(p => p.id === activeProjectId);
-                if (projectToSave) {
-                    const { plans, ...projectData } = projectToSave;
-                    await db.projects.put(projectData);
-                    // If we edited plan scale/metadata, we should save plans too.
-                    if (plans) {
-                        const plansToSave = plans.map(p => ({ ...p, projectId: projectToSave.id }));
-                        await db.plans.bulkPut(plansToSave);
-                    }
-                }
+
+            // Internal helper: strips media and persists the project metadata to DB.
+            // This is the single point-of-write for the projects table.
+            // All callers should use the higher-level action functions below.
+            const _persistProject = (projectObj, setDbError_) => {
+                const { plans, ...projectData } = projectObj;
+                const cleanReports = (projectData.reports || []).map(r => ({
+                    ...r,
+                    observations: stripObservationMedia(r.observations || [])
+                }));
+                return withDbWrite(
+                    () => db.projects.put({ ...projectData, reports: cleanReports }),
+                    setDbError_
+                );
             };
 
             const [activeProjectId, setActiveProjectId] = useState(null);
             const [activeReportId, setActiveReportId] = useState(null);
             const [activePlanId, setActivePlanId] = useState(null);
+
+            // Error / warning banners
+            const [dbError, setDbError] = useState(null);
+            const [storageWarning, setStorageWarning] = useState(null);
+
+            // Media loaded on-demand for the currently selected observation.
+            // Observations in IndexedDB have image/planMarkup stripped to null after v4;
+            // these state values hold the fetched data so components can display them.
+            const [activePhotoUrl, setActivePhotoUrl] = useState(null);
+            const [activeMarkupUrl, setActiveMarkupUrl] = useState(null);
+
 
             // UI State
             const [selectedPinId, setSelectedPinId] = useState(null);
@@ -1628,6 +1821,7 @@
             const [newProjectPages, setNewProjectPages] = useState(1);
 
             const fileInputRef = useRef(null);
+            const fileInputImportRef = useRef(null);
 
             // Derived State
             const activeProject = useMemo(() => projects.find(p => p.id === activeProjectId), [projects, activeProjectId]);
@@ -1651,6 +1845,68 @@
 
             const activeObservation = useMemo(() => activeReport?.observations.find(o => o.id === selectedPinId), [activeReport, selectedPinId]);
 
+            // When the selected observation changes, load its photo and markup from
+            // their dedicated IndexedDB tables. This is the only place that fetches
+            // media eagerly — everything else is loaded on-demand during export.
+            useEffect(() => {
+                let cancelled = false;
+
+                // Revoke old URLs
+                if (activePhotoUrl && !activePhotoUrl.startsWith('http') && !activePhotoUrl.startsWith('data:')) {
+                    URL.revokeObjectURL(activePhotoUrl);
+                }
+                if (activeMarkupUrl && !activeMarkupUrl.startsWith('http') && !activeMarkupUrl.startsWith('data:')) {
+                    URL.revokeObjectURL(activeMarkupUrl);
+                }
+
+                setActivePhotoUrl(null);
+                setActiveMarkupUrl(null);
+
+                if (!selectedPinId) return;
+
+                const loadMedia = async () => {
+                    try {
+                        const photoBlob = await db_loadPhoto(selectedPinId);
+                        if (photoBlob && !cancelled) {
+                            const url = typeof photoBlob === 'string' ? photoBlob : URL.createObjectURL(photoBlob);
+                            setActivePhotoUrl(url);
+                        }
+                        const markupBlob = await db_loadMarkup(selectedPinId);
+                        if (markupBlob && !cancelled) {
+                            const url = typeof markupBlob === 'string' ? markupBlob : URL.createObjectURL(markupBlob);
+                            setActiveMarkupUrl(url);
+                        }
+                    } catch (e) {
+                        console.error('Error loading media', e);
+                    }
+                };
+                loadMedia();
+
+                return () => {
+                    cancelled = true;
+                };
+            }, [selectedPinId]);
+
+            // Cleanup URLs on unmount of App
+            useEffect(() => {
+                return () => {
+                    if (activePhotoUrl && !activePhotoUrl.startsWith('http') && !activePhotoUrl.startsWith('data:')) {
+                        URL.revokeObjectURL(activePhotoUrl);
+                    }
+                    if (activeMarkupUrl && !activeMarkupUrl.startsWith('http') && !activeMarkupUrl.startsWith('data:')) {
+                        URL.revokeObjectURL(activeMarkupUrl);
+                    }
+                };
+            }, [activePhotoUrl, activeMarkupUrl]);
+
+            // The "display" version of the active observation merges the stripped DB
+            // record with the transiently loaded media. Pass this to components that
+            // need to render the photo or markup (ObservationDrawer, PhotoEditor).
+            const activeObservationDisplay = useMemo(() => {
+                if (!activeObservation) return null;
+                return { ...activeObservation, image: activePhotoUrl, planMarkup: activeMarkupUrl };
+            }, [activeObservation, activePhotoUrl, activeMarkupUrl]);
+
             // --- NAVIGATION ---
             const goHome = () => { setView('projects_list'); setActiveProjectId(null); setActiveReportId(null); setSelectedPinId(null); };
             const goToProject = (pid) => { setActiveProjectId(pid); setView('project_detail'); };
@@ -1659,6 +1915,36 @@
                 setView('report_editor');
                 setCurrentPage(1); // Reset to page 1
                 setSelectedPinId(null); // Clear selection
+            };
+
+            const renderBanners = () => {
+                if (!dbError && !storageWarning) return null;
+                return (
+                    <div className="flex flex-col w-full z-30 shrink-0">
+                        {dbError && (
+                            <div className="bg-red-500 text-white px-4 py-3 flex items-center justify-between text-sm font-semibold shadow-inner animate-pulse">
+                                <div className="flex items-center space-x-2">
+                                    <AlertTriangle size={18} className="shrink-0" />
+                                    <span>{dbError}</span>
+                                </div>
+                                <button onClick={() => setDbError(null)} className="hover:bg-red-600 p-1 rounded transition-colors text-white/80 hover:text-white">
+                                    <X size={16} />
+                                </button>
+                            </div>
+                        )}
+                        {storageWarning && (
+                            <div className="bg-amber-500 text-white px-4 py-3 flex items-center justify-between text-sm font-semibold shadow-inner">
+                                <div className="flex items-center space-x-2">
+                                    <Info size={18} className="shrink-0" />
+                                    <span>{storageWarning}</span>
+                                </div>
+                                <button onClick={() => setStorageWarning(null)} className="hover:bg-amber-600 p-1 rounded transition-colors text-white/80 hover:text-white">
+                                    <X size={16} />
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                );
             };
 
             // --- ACTIONS ---
@@ -1713,6 +1999,7 @@
                 setNewProjectType('image');
                 setNewProjectPages(1);
                 setIsProjectModalOpen(false);
+                checkStorageQuota(setStorageWarning);
             };
 
             const addPlanToProject = async () => {
@@ -1755,7 +2042,7 @@
                                 data: imgData
                             }));
                             await db.planPages.bulkPut(pages);
-                        } else if (typeof newPlanFile.data === 'string') {
+                        } else if (typeof newPlanFile.data === 'string' || newPlanFile.data instanceof Blob) {
                             await db.planPages.put({ planId: newPlanId, pageIndex: 0, data: newPlanFile.data });
                         }
                     }
@@ -1770,6 +2057,7 @@
                 setNewPlanFile(null);
                 setIsAddPlanModalOpen(false);
                 setActivePlanId(newPlan.id);
+                checkStorageQuota(setStorageWarning);
             };
 
             const requestDeleteProject = (pid, e) => {
@@ -1778,41 +2066,233 @@
                 setIsDeleteConfirmOpen(true);
             };
 
+            // Full cascade delete: removes all IndexedDB records associated with a project.
+            const _deleteProjectFromDB = async (pid) => {
+                const plansToDelete = await db.plans.where('projectId').equals(pid).toArray();
+                const planIds = plansToDelete.map(p => p.id);
+                const proj = await db.projects.get(pid);
+                const obsIds = (proj?.reports || []).flatMap(r => (r.observations || []).map(o => o.id));
+                await Promise.all([
+                    db.projects.delete(pid),
+                    db.plans.bulkDelete(planIds),
+                    ...planIds.map(planId => db.planPages.where('planId').equals(planId).delete()),
+                    ...obsIds.map(id => db_deleteObservationMedia(id))
+                ]);
+            };
+
             const executeDeleteProject = async () => {
                 if (!projectToDeleteId) return;
                 const pid = projectToDeleteId;
-
-                // Optimistic UI update
-                const updated = projects.filter(p => p.id !== pid);
-                setProjects(updated);
-
-                try {
-                    // DB Delete Project and its Linked Plans
-                    await db.projects.delete(pid);
-                    const plansToDelete = await db.plans.where('projectId').equals(pid).toArray();
-                    const planIds = plansToDelete.map(p => p.id);
-                    await db.plans.bulkDelete(planIds);
-                } catch (err) {
-                    console.error("Failed to delete project", err);
-                }
-
+                setProjects(projects.filter(p => p.id !== pid));
                 setIsDeleteConfirmOpen(false);
                 setProjectToDeleteId(null);
+                try {
+                    await _deleteProjectFromDB(pid);
+                    checkStorageQuota(setStorageWarning);
+                } catch (err) { console.error('Failed to fully delete project from DB:', err); }
             };
 
             const deleteProject = async () => {
-                if (confirm("Are you sure you want to delete this project?")) {
+                if (confirm('Are you sure you want to delete this project? This cannot be undone.')) {
                     const pid = activeProjectId;
-                    const updated = projects.filter(p => p.id !== pid);
-                    setProjects(updated);
-
-                    // DB Delete Project and its Linked Plans
-                    await db.projects.delete(pid);
-                    const plansToDelete = await db.plans.where('projectId').equals(pid).toArray();
-                    const planIds = plansToDelete.map(p => p.id);
-                    await db.plans.bulkDelete(planIds);
-
+                    setProjects(projects.filter(p => p.id !== pid));
                     goHome();
+                    try {
+                        await _deleteProjectFromDB(pid);
+                        checkStorageQuota(setStorageWarning);
+                    } catch (err) { console.error('Failed to fully delete project from DB:', err); }
+                }
+            };
+
+            const exportProjectBackup = async (projectId) => {
+                const proj = projects.find(p => p.id === projectId);
+                if (!proj) return;
+
+                try {
+                    const zip = new JSZip();
+                    
+                    const metadata = {
+                        id: proj.id,
+                        name: proj.name,
+                        address: proj.address,
+                        reports: proj.reports.map(r => ({
+                            ...r,
+                            observations: stripObservationMedia(r.observations || [])
+                        })),
+                        plans: proj.plans.map(p => ({
+                            id: p.id,
+                            name: p.name,
+                            type: p.type,
+                            pages: p.pages
+                        }))
+                    };
+                    zip.file("project.json", JSON.stringify(metadata, null, 2));
+
+                    // 1. Pack plan pages
+                    for (const plan of proj.plans) {
+                        const numPages = plan.pages || 1;
+                        for (let i = 0; i < numPages; i++) {
+                            const pageRec = await db.planPages.get([plan.id, i]);
+                            if (pageRec && pageRec.data) {
+                                const fileData = getZipData(pageRec.data);
+                                if (fileData) {
+                                    zip.file(`plans/${plan.id}_${i}.jpg`, fileData);
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Pack photos & markups
+                    const obsIds = (proj.reports || []).flatMap(r => (r.observations || []).map(o => o.id));
+                    for (const obsId of obsIds) {
+                        const photoData = await db_loadPhoto(obsId);
+                        if (photoData) {
+                            const fileData = getZipData(photoData);
+                            if (fileData) {
+                                zip.file(`photos/${obsId}.jpg`, fileData);
+                            }
+                        }
+                        const markupData = await db_loadMarkup(obsId);
+                        if (markupData) {
+                            const fileData = getZipData(markupData);
+                            if (fileData) {
+                                zip.file(`markups/${obsId}.png`, fileData);
+                            }
+                        }
+                    }
+
+                    const content = await zip.generateAsync({ type: 'blob' });
+                    saveAs(content, `${proj.name.replace(/[^a-z0-9]/gi, '_')}_backup.zip`);
+                } catch (err) {
+                    console.error("Backup export failed:", err);
+                    alert("Backup export failed.");
+                }
+            };
+
+            const importProjectBackup = async (zipFile) => {
+                try {
+                    const zip = await JSZip.loadAsync(zipFile);
+                    const jsonFile = zip.file("project.json");
+                    if (!jsonFile) {
+                        alert("Invalid backup file: project.json not found.");
+                        return;
+                    }
+                    const jsonText = await jsonFile.async("text");
+                    const importedProj = JSON.parse(jsonText);
+
+                    // Map of old IDs to new IDs to prevent collisions
+                    const idMap = {};
+                    const getNewId = (oldId) => {
+                        if (!oldId) return '';
+                        if (!idMap[oldId]) {
+                            idMap[oldId] = generateId();
+                        }
+                        return idMap[oldId];
+                    };
+
+                    const newProjId = getNewId(importedProj.id);
+                    const newProj = {
+                        id: newProjId,
+                        name: `${importedProj.name} (Imported)`,
+                        address: importedProj.address || "No Address",
+                        reports: []
+                    };
+
+                    // Map plans
+                    const newPlans = [];
+                    for (const plan of importedProj.plans || []) {
+                        const newPlanId = getNewId(plan.id);
+                        const newPlan = {
+                            id: newPlanId,
+                            projectId: newProjId,
+                            name: plan.name,
+                            type: plan.type,
+                            pages: plan.pages,
+                            data: null
+                        };
+                        newPlans.push(newPlan);
+
+                        // Save plan pages
+                        const numPages = plan.pages || 1;
+                        for (let i = 0; i < numPages; i++) {
+                            const zipPath = `plans/${plan.id}_${i}.jpg`;
+                            const zFile = zip.file(zipPath);
+                            if (zFile) {
+                                const blob = await zFile.async("blob");
+                                await db.planPages.put({
+                                    planId: newPlanId,
+                                    pageIndex: i,
+                                    data: blob
+                                });
+                            }
+                        }
+                    }
+
+                    // Map reports & observations
+                    newProj.reports = (importedProj.reports || []).map(r => {
+                        const newRepId = generateId();
+                        const newObs = (r.observations || []).map(o => {
+                            const newObsId = getNewId(o.id);
+                            return {
+                                ...o,
+                                id: newObsId,
+                                planId: getNewId(o.planId),
+                                hasPhoto: o.hasPhoto,
+                                hasMarkup: o.hasMarkup
+                            };
+                        });
+                        return {
+                            ...r,
+                            id: newRepId,
+                            observations: newObs
+                        };
+                    });
+
+                    // Save observation photos & markups
+                    const oldObsIds = (importedProj.reports || []).flatMap(r => (r.observations || []).map(o => o.id));
+                    for (const oldObsId of oldObsIds) {
+                        const newObsId = getNewId(oldObsId);
+
+                        const photoFile = zip.file(`photos/${oldObsId}.jpg`);
+                        if (photoFile) {
+                            const blob = await photoFile.async("blob");
+                            await db.observationPhotos.put({ observationId: newObsId, data: blob });
+                        }
+
+                        const markupFile = zip.file(`markups/${oldObsId}.png`);
+                        if (markupFile) {
+                            const blob = await markupFile.async("blob");
+                            await db.observationMarkups.put({ observationId: newObsId, data: blob });
+                        }
+                    }
+
+                    // Save project & plans to DB
+                    await db.projects.add(newProj);
+                    for (const plan of newPlans) {
+                        await db.plans.add(plan);
+                    }
+
+                    // Hydrate state
+                    const newProjState = { ...newProj, plans: newPlans };
+                    setProjects(prev => [...prev, newProjState]);
+                    
+                    alert("Project imported successfully!");
+                    checkStorageQuota(setStorageWarning);
+                } catch (e) {
+                    console.error("Failed to import project backup:", e);
+                    alert("Import failed. Check file format.");
+                }
+            };
+
+            const clearPlanPagesCache = async (projectId) => {
+                const proj = projects.find(p => p.id === projectId);
+                if (!proj) return;
+
+                if (confirm("Are you sure you want to clear the floor plan image cache for this project? This will free up significant space, but you will not be able to view the floor plans unless you re-upload them later.")) {
+                    const planIds = proj.plans.map(p => p.id);
+                    await Promise.all(planIds.map(planId => db.planPages.where('planId').equals(planId).delete()));
+                    alert("Floor plan cache cleared successfully.");
+                    checkStorageQuota(setStorageWarning);
                 }
             };
 
@@ -1821,59 +2301,59 @@
                     id: generateId(),
                     name: `Field Report #${activeProject.reports.length + 1}`,
                     date: new Date().toISOString(),
-                    author: "Author",
-                    weather: "",
-                    contractors: "",
-                    workInProgress: "",
+                    author: 'Author',
+                    weather: '',
+                    contractors: '',
+                    workInProgress: '',
                     observations: []
                 };
                 const updatedProj = { ...activeProject, reports: [newRep, ...activeProject.reports] };
                 const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
                 setProjects(updatedList);
-                await db.projects.put(updatedProj);
-                setActiveReportId(newRep.id); // Set active ID first
+                await _persistProject(updatedProj, setDbError);
+                setActiveReportId(newRep.id);
                 setView('report_editor');
-                setCurrentPage(1); // Reset
+                setCurrentPage(1);
             };
 
             const deleteReport = async (reportId, e) => {
                 e.stopPropagation();
-                if (confirm("Delete this report?")) {
+                if (confirm('Delete this report and all its observations?')) {
+                    const reportToDelete = activeProject.reports.find(r => r.id === reportId);
                     const updatedProj = {
                         ...activeProject,
                         reports: activeProject.reports.filter(r => r.id !== reportId)
                     };
                     const updatedList = projects.map(p => p.id === activeProjectId ? updatedProj : p);
                     setProjects(updatedList);
-                    await db.projects.put(updatedProj);
+                    await _persistProject(updatedProj, setDbError);
+                    // Clean up media for each deleted observation
+                    if (reportToDelete) {
+                        const obsIds = (reportToDelete.observations || []).map(o => o.id);
+                        await Promise.all(obsIds.map(id => db_deleteObservationMedia(id).catch(console.error)));
+                    }
                 }
             };
 
             const handleAddPin = ({ x, y }) => {
                 const obsList = activeReport.observations;
                 const newId = generateId();
-                // Number logic: Only increment for CA items or keep separate counters?
-                // Simplest: Increment number regardless of type, but suppress display for Facade.
-                // Or maybe filter obsList by type if we want separate numbering?
-                // User said "The observation number will be suppressed for these item". 
-                // Let's keep a single sequence for simplicity unless requested otherwise.
                 const nextNumber = obsList.length > 0 ? Math.max(...obsList.map(o => o.number)) + 1 : 1;
-
                 const newObs = {
                     id: newId,
                     number: nextNumber,
-                    planId: activePlanId || activePlan.id, // Fallback
+                    planId: activePlanId || activePlan.id,
                     page: currentPage,
                     x, y,
-                    type: observationMode, // 'CA' or 'Facade'
-                    status: observationMode === 'Facade' ? 'Crack' : 'In Progress', // Default status
-                    quantity: '', // Default quantity
+                    type: observationMode,
+                    status: observationMode === 'Facade' ? 'Crack' : 'In Progress',
+                    quantity: '',
                     title: '',
                     description: '',
                     createdAt: new Date().toISOString(),
-                    image: null
+                    hasPhoto: false,
+                    hasMarkup: false
                 };
-
                 updateReportObservations([...obsList, newObs]);
                 setSelectedPinId(newId);
             };
@@ -1883,6 +2363,10 @@
                 updateReport(updatedReport);
             };
 
+            // Core report persistence.
+            // React state always holds the full in-memory view (including any transiently
+            // loaded media). The DB only receives the stripped version — photos and
+            // markups live in their own tables and are never embedded in the project blob.
             const updateReport = async (updatedReport) => {
                 const updatedProject = {
                     ...activeProject,
@@ -1890,22 +2374,59 @@
                 };
                 const updatedList = projects.map(p => p.id === activeProjectId ? updatedProject : p);
                 setProjects(updatedList);
-                await db.projects.put(updatedProject);
+                const result = await _persistProject(updatedProject, setDbError);
+                if (result.ok) setDbError(null);
             };
 
-            const updateObservation = (field, value) => {
-                const updatedObsList = activeReport.observations.map(o => o.id === selectedPinId ? { ...o, [field]: value } : o);
+            // updateObservation handles standard text/metadata fields only.
+            // Media fields (image, planMarkup) are managed by dedicated handlers below.
+            const updateObservation = async (field, value) => {
+                if (field === 'image' || field === 'planMarkup') {
+                    if (value === null) {
+                        const obsId = selectedPinId;
+                        if (!obsId) return;
+                        if (field === 'image') {
+                            const result = await withDbWrite(() => db_savePhoto(obsId, null), setDbError);
+                            if (result.ok) {
+                                setDbError(null);
+                                if (activePhotoUrl && !activePhotoUrl.startsWith('http') && !activePhotoUrl.startsWith('data:')) {
+                                    URL.revokeObjectURL(activePhotoUrl);
+                                }
+                                setActivePhotoUrl(null);
+                                const updatedObsList = activeReport.observations.map(o =>
+                                    o.id === obsId ? { ...o, hasPhoto: false } : o
+                                );
+                                updateReportObservations(updatedObsList);
+                            }
+                        } else {
+                            const result = await withDbWrite(() => db_saveMarkup(obsId, null), setDbError);
+                            if (result.ok) {
+                                setDbError(null);
+                                if (activeMarkupUrl && !activeMarkupUrl.startsWith('http') && !activeMarkupUrl.startsWith('data:')) {
+                                    URL.revokeObjectURL(activeMarkupUrl);
+                                }
+                                setActiveMarkupUrl(null);
+                                const updatedObsList = activeReport.observations.map(o =>
+                                    o.id === obsId ? { ...o, hasMarkup: false } : o
+                                );
+                                updateReportObservations(updatedObsList);
+                            }
+                        }
+                    } else {
+                        console.warn(`updateObservation called with media field '${field}' and non-null value. Use the dedicated media handlers.`);
+                    }
+                    return;
+                }
+                const updatedObsList = activeReport.observations.map(o =>
+                    o.id === selectedPinId ? { ...o, [field]: value } : o
+                );
                 updateReportObservations(updatedObsList);
             };
 
-            const handlePlanMarkup = async () => {
-                if (!activeObservation) { alert("No active observation"); return; }
-                if (!activePlan) { alert("No active plan"); return; }
-
-                // Enable Drawing Mode in PlanViewer
+            const handlePlanMarkup = () => {
+                if (!activeObservation) { alert('No active observation'); return; }
+                if (!activePlan) { alert('No active plan'); return; }
                 setIsDrawingMode(true);
-                // We no longer need to load background here as PlanViewer handles it naturally.
-                // We just need to ensure the correct page is shown (which it should be).
             };
 
             const handleMovePin = (pinId, x, y) => {
@@ -1922,40 +2443,91 @@
                 }
             };
 
-            const removeObservation = () => {
-                updateReportObservations(activeReport.observations.filter(o => o.id !== selectedPinId));
+            // Remove the observation and clean up its media from dedicated tables.
+            const removeObservation = async () => {
+                const obsId = selectedPinId;
+                updateReportObservations(activeReport.observations.filter(o => o.id !== obsId));
                 setSelectedPinId(null);
+                setActivePhotoData(null);
+                setActiveMarkupData(null);
+                await db_deleteObservationMedia(obsId).catch(console.error);
             };
 
             const triggerCamera = () => fileInputRef.current && fileInputRef.current.click();
-            const handlePhotoUpload = (e) => {
+
+            // Photo upload: save directly to observationPhotos table.
+            // The observation record only carries a hasPhoto flag.
+            const handlePhotoUpload = async (e) => {
                 const file = e.target.files[0];
-                if (file) {
-                    const reader = new FileReader();
-                    reader.onload = (ev) => {
-                        updateObservation('image', ev.target.result);
-                    };
-                    reader.readAsDataURL(file);
+                if (!file || !selectedPinId) return;
+                e.target.value = ''; // allow re-selecting the same file
+
+                const result = await withDbWrite(() => db_savePhoto(selectedPinId, file), setDbError);
+                if (!result.ok) return;
+
+                const url = URL.createObjectURL(file);
+                if (activePhotoUrl && !activePhotoUrl.startsWith('http') && !activePhotoUrl.startsWith('data:')) {
+                    URL.revokeObjectURL(activePhotoUrl);
                 }
+                setActivePhotoUrl(url);
+
+                const updatedObsList = activeReport.observations.map(o =>
+                    o.id === selectedPinId ? { ...o, hasPhoto: true } : o
+                );
+                updateReportObservations(updatedObsList);
+                setDbError(null);
+                checkStorageQuota(setStorageWarning);
             };
 
+            // Open the PhotoEditor overlay for annotating the current observation photo.
             const handleMarkup = () => {
-                if (activeObservation.image) {
-                    setMarkupImage(activeObservation.image);
+                if (activePhotoUrl) {
+                    setMarkupImage(activePhotoUrl);
                     setMarkupBackground(null);
                     setMarkupTarget('image');
                 }
             };
 
-            const handleMarkupSave = (newImageData) => {
-                if (markupTarget === 'planMarkup') {
-                    updateObservation('planMarkup', newImageData);
-                } else {
-                    updateObservation('image', newImageData);
+            // Called by PhotoEditor when the user taps the checkmark.
+            const handleMarkupSave = async (newImageData) => {
+                // Photo annotation path
+                const blob = dataURLtoBlob(newImageData);
+                const result = await withDbWrite(() => db_savePhoto(selectedPinId, blob), setDbError);
+                if (result.ok) {
+                    const url = URL.createObjectURL(blob);
+                    if (activePhotoUrl && !activePhotoUrl.startsWith('http') && !activePhotoUrl.startsWith('data:')) {
+                        URL.revokeObjectURL(activePhotoUrl);
+                    }
+                    setActivePhotoUrl(url);
+                    setDbError(null);
                 }
                 setMarkupImage(null);
                 setMarkupBackground(null);
             };
+
+            // Called when the user taps Save in the plan drawing toolbar.
+            // Saves the canvas overlay to the observationMarkups table.
+            const handlePlanDrawingSave = async (dataUrl) => {
+                if (!selectedPinId) { setIsDrawingMode(false); return; }
+                const blob = dataURLtoBlob(dataUrl);
+                const result = await withDbWrite(() => db_saveMarkup(selectedPinId, blob), setDbError);
+                if (result.ok) {
+                    const url = URL.createObjectURL(blob);
+                    if (activeMarkupUrl && !activeMarkupUrl.startsWith('http') && !activeMarkupUrl.startsWith('data:')) {
+                        URL.revokeObjectURL(activeMarkupUrl);
+                    }
+                    setActiveMarkupUrl(url);
+                    const updatedObsList = activeReport.observations.map(o =>
+                        o.id === selectedPinId ? { ...o, hasMarkup: true } : o
+                    );
+                    updateReportObservations(updatedObsList);
+                    setDbError(null);
+                    checkStorageQuota(setStorageWarning);
+                }
+                setIsDrawingMode(false);
+            };
+
+
 
             // --- EXPORT LOGIC ---
             // Helper to render specific PDF page to canvas
@@ -1972,7 +2544,7 @@
                     // If plan.type == 'raster_pdf', pageNum is 1..N.
                     const index = (plan.type === 'image') ? 0 : (pageNum - 1);
 
-                    const pageRec = await db.planPages.get({ planId: plan.id, pageIndex: index });
+                    const pageRec = await db.planPages.get([plan.id, index]);
                     if (pageRec) {
                         imgData = pageRec.data;
                     } else {
@@ -1989,20 +2561,22 @@
                     return new Promise((resolve) => {
                         const img = new Image();
                         img.crossOrigin = "anonymous";
-                        img.src = imgData;
+                        const url = typeof imgData === 'string' ? imgData : URL.createObjectURL(imgData);
+                        img.src = url;
                         img.onload = () => {
                             const canvas = document.createElement('canvas');
-                            // Use native resolution or scale?
-                            // Stored images are already resized to max 2400px.
-                            // For export, we want good quality.
                             canvas.width = 1600;
                             const scale = 1600 / img.width;
                             canvas.height = img.height * scale;
                             const ctx = canvas.getContext('2d');
                             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                            if (url !== imgData) URL.revokeObjectURL(url);
                             resolve({ canvas, width: canvas.width, height: canvas.height });
-                        }
-                        img.onerror = () => resolve(null);
+                        };
+                        img.onerror = () => {
+                            if (url !== imgData) URL.revokeObjectURL(url);
+                            resolve(null);
+                        };
                     });
 
                 } catch (err) {
@@ -2037,21 +2611,31 @@
                     return isMatch && (o.page || 1) === pageNum;
                 });
 
-                // Draw Markups (Linework) - Layer 2
-                // We must draw these before pins so pins are on top.
-                // Since loading images is async, we iterate sequentially or promise.all
-                const markups = pins.filter(p => p.planMarkup);
-                if (markups.length > 0) {
-                    await Promise.all(markups.map(m => new Promise((resolve) => {
-                        const img = new Image();
-                        img.onload = () => {
-                            ctx.drawImage(img, 0, 0, width, height);
-                            resolve();
-                        };
-                        img.onerror = () => resolve();
-                        img.crossOrigin = "anonymous";
-                        img.src = m.planMarkup;
-                    })));
+                // Draw Markups (Linework) - Layer 2, drawn before pins so pins sit on top.
+                // Markups now live in observationMarkups table — load each before drawing.
+                const obsWithMarkup = pins.filter(p => p.hasMarkup);
+                if (obsWithMarkup.length > 0) {
+                    await Promise.all(obsWithMarkup.map(async (m) => {
+                        try {
+                            const markupData = await db_loadMarkup(m.id);
+                            if (!markupData) return;
+                            await new Promise((resolve) => {
+                                const img = new Image();
+                                const url = typeof markupData === 'string' ? markupData : URL.createObjectURL(markupData);
+                                img.onload = () => {
+                                    ctx.drawImage(img, 0, 0, width, height);
+                                    if (url !== markupData) URL.revokeObjectURL(url);
+                                    resolve();
+                                };
+                                img.onerror = () => {
+                                    if (url !== markupData) URL.revokeObjectURL(url);
+                                    resolve();
+                                };
+                                img.crossOrigin = 'anonymous';
+                                img.src = url;
+                            });
+                        } catch (e) { console.error('Error drawing markup for obs', m.id, e); }
+                    }));
                 }
 
                 pins.forEach(pin => {
@@ -2178,37 +2762,29 @@
 
                 let count = 0;
 
-                // Helper to get blob from dataURL
-                const dataURLtoBlob = (dataurl) => {
-                    const arr = dataurl.split(',');
-                    const mime = arr[0].match(/:(.*?);/)[1];
-                    const bstr = atob(arr[1]);
-                    let n = bstr.length;
-                    const u8arr = new Uint8Array(n);
-                    while (n--) u8arr[n] = bstr.charCodeAt(n);
-                    return new Blob([u8arr], { type: mime });
-                };
-
-                activeReport.observations.forEach(obs => {
-                    if (obs.image) {
-                        try {
-                            const dateStr = new Date(obs.createdAt).toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
-                            const filename = `${dateStr}_Item${obs.number}.jpg`;
-                            const blob = dataURLtoBlob(obs.image);
-                            folder.file(filename, blob);
-                            count++;
-                        } catch (e) { console.error("Error processing image", e); }
-                    }
-                });
+                // Photos now live in the observationPhotos table — load each on demand.
+                for (const obs of activeReport.observations) {
+                    if (!obs.hasPhoto) continue;
+                    try {
+                        const photoData = await db_loadPhoto(obs.id);
+                        if (!photoData) continue;
+                        const fileData = getZipData(photoData);
+                        if (!fileData) continue;
+                        const dateStr = new Date(obs.createdAt).toISOString().slice(0, 10).replace(/-/g, '');
+                        folder.file(`${dateStr}_Item${obs.number}.jpg`, fileData);
+                        count++;
+                    } catch (e) { console.error('Error exporting photo for obs', obs.id, e); }
+                }
 
                 if (count === 0) {
-                    alert("No images to export in this report.");
+                    alert('No photos to export in this report.');
                     return;
                 }
 
-                const content = await zip.generateAsync({ type: "blob" });
+                const content = await zip.generateAsync({ type: 'blob' });
                 saveAs(content, `${activeProject.name}_Images.zip`);
             };
+
 
             const exportToWord = async () => {
                 // Find all unique plan/page combinations that have pins
@@ -2261,29 +2837,56 @@
                     }
                 }
 
+                // Build observation rows asynchronously — photos now come from the DB.
+                const statusColors = {
+                    'Defect':     { bg: '#fee2e2', fg: '#991b1b' },
+                    'Reference':  { bg: '#dbeafe', fg: '#1e40af' },
+                    'Discussion': { bg: '#fef9c3', fg: '#854d0e' },
+                    'RFI':        { bg: '#ffedd5', fg: '#9a3412' },
+                    'Progress':   { bg: '#dcfce7', fg: '#166534' },
+                };
+                const obsHtmlParts = [];
+                for (const obs of activeReport.observations) {
+                    const obsPhoto = obs.hasPhoto ? await db_loadPhoto(obs.id).catch(() => null) : null;
+                    const photoSrc = obsPhoto ? await blobToDataURL(obsPhoto).catch(() => null) : null;
+                    const sc = statusColors[obs.status] || { bg: '#f3f4f6', fg: '#374151' };
+                    obsHtmlParts.push(`
+                        <div class="obs-container">
+                            <div class="obs-header">Observation #${obs.number}</div>
+                            <div class="obs-content">
+                                <div class="obs-text">
+                                    <div class="status-badge" style="background:${sc.bg}; color:${sc.fg}">${obs.status}</div>
+                                    <h3>${obs.title || '(No Title)'}</h3>
+                                    <p><strong>Page:</strong> ${obs.page || 1}</p>
+                                    <p>${obs.description || 'No notes added.'}</p>
+                                </div>
+                                <div class="obs-image-cell">
+                                    ${photoSrc ? `<img src="${photoSrc}" class="obs-img" width="300" />` : '<p style="color:#aaa">No photo</p>'}
+                                </div>
+                            </div>
+                        </div>`);
+                }
+
                 const htmlContent = `
                     <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-                        <head><meta charset="utf-8"><title>Field Report Report</title>
+                        <head><meta charset="utf-8"><title>Field Report</title>
                             <style>
-                                body {font - family: 'Arial', sans-serif; padding: 40px; }
-                                h1 {color: #000; font-size: 24pt; border-bottom: 2px solid #000; padding-bottom: 10px; }
-                                h2 {color: #333; font-size: 16pt; margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-                                .meta-table {width: 100%; margin-bottom: 30px; border-collapse: collapse; }
-                                .meta-table td {padding: 5px 10px; border: 1px solid #ddd; }
-                                .label {font - weight: bold; background: #f9f9f9; width: 150px; }
-
-                                /* Observation Table Style */
-                                .obs-container {margin - bottom: 30px; page-break-inside: avoid; border: 1px solid #000; }
-                                .obs-header {background: #000; color: #fff; padding: 10px; font-weight: bold; font-size: 14pt; }
-                                .obs-content {display: table; width: 100%; table-layout: fixed; }
-                                .obs-text {display: table-cell; width: 50%; padding: 15px; vertical-align: top; background: #f9f9f9; }
-                                .obs-image-cell {display: table-cell; width: 50%; padding: 15px; vertical-align: middle; text-align: center; background: #fff; border-left: 1px solid #ddd; }
-                                .obs-img {width: 100%; height: auto; border: 1px solid #eee; }
-                                .status-badge {display: inline-block; padding: 4px 8px; border-radius: 4px; background: #eee; font-weight: bold; font-size: 10pt; margin-bottom: 10px; }
-
-                                .plan-container {text - align: center; margin-top: 40px; page-break-before: always; }
-                                .plan-img {width: 100%; height: auto; border: 1px solid #ccc; margin-bottom: 20px; }
-                                .plan-label {font - weight: bold; font-size: 12pt; margin-bottom: 10px; display: block; }
+                                body { font-family: Arial, sans-serif; padding: 40px; }
+                                h1 { color: #000; font-size: 24pt; border-bottom: 2px solid #000; padding-bottom: 10px; }
+                                h2 { color: #333; font-size: 16pt; margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+                                .meta-table { width: 100%; margin-bottom: 30px; border-collapse: collapse; }
+                                .meta-table td { padding: 5px 10px; border: 1px solid #ddd; }
+                                .label { font-weight: bold; background: #f9f9f9; width: 150px; }
+                                .obs-container { margin-bottom: 30px; page-break-inside: avoid; border: 1px solid #000; }
+                                .obs-header { background: #000; color: #fff; padding: 10px; font-weight: bold; font-size: 14pt; }
+                                .obs-content { display: table; width: 100%; table-layout: fixed; }
+                                .obs-text { display: table-cell; width: 50%; padding: 15px; vertical-align: top; background: #f9f9f9; }
+                                .obs-image-cell { display: table-cell; width: 50%; padding: 15px; vertical-align: middle; text-align: center; background: #fff; border-left: 1px solid #ddd; }
+                                .obs-img { width: 100%; height: auto; border: 1px solid #eee; }
+                                .status-badge { display: inline-block; padding: 4px 8px; border-radius: 4px; background: #eee; font-weight: bold; font-size: 10pt; margin-bottom: 10px; }
+                                .plan-container { text-align: center; margin-top: 40px; page-break-before: always; }
+                                .plan-img { width: 100%; height: auto; border: 1px solid #ccc; margin-bottom: 20px; }
+                                .plan-label { font-weight: bold; font-size: 12pt; margin-bottom: 10px; display: block; }
                             </style></head><body>
 
                             <h1>Field Observation Report</h1>
@@ -2299,34 +2902,7 @@
                             </table>
 
                             <h2>Observations</h2>
-                            ${activeReport.observations.map(obs => `
-                        <div class="obs-container">
-                            <div class="obs-header">Observation #${obs.number}</div>
-                            <div class="obs-content">
-                                <div class="obs-text">
-                                    <div class="status-badge" style="background:${obs.status === 'Defect' ? '#fee2e2' :
-                        obs.status === 'Reference' ? '#dbeafe' :
-                            obs.status === 'Discussion' ? '#fef9c3' :
-                                obs.status === 'RFI' ? '#ffedd5' :
-                                    obs.status === 'Progress' ? '#dcfce7' : '#f3f4f6'
-                    }; color:${obs.status === 'Defect' ? '#991b1b' :
-                        obs.status === 'Reference' ? '#1e40af' :
-                            obs.status === 'Discussion' ? '#854d0e' :
-                                obs.status === 'RFI' ? '#9a3412' :
-                                    obs.status === 'Progress' ? '#166534' : '#374151'
-                    }">
-                                        ${obs.status}
-                                    </div>
-                                    <h3>${obs.title || '(No Title)'}</h3>
-                                    <p><strong>Page:</strong> ${obs.page || 1}</p>
-                                    <p>${obs.description || 'No notes added.'}</p>
-                                </div>
-                                <div class="obs-image-cell">
-                                    ${obs.image ? `<img src="${obs.image}" class="obs-img" width="300" />` : '<p style="color:#aaa">No photo</p>'}
-                                </div>
-                            </div>
-                        </div>
-                    `).join('')}
+                            ${obsHtmlParts.join('')}
 
                             <div class="plan-container">
                                 <h2>Reference Plans</h2>
@@ -2339,6 +2915,7 @@
                             </div>
 
                         </body></html>`;
+
 
                 const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword' });
                 const link = document.createElement('a');
@@ -2462,10 +3039,27 @@
                             </div>
                             <DarkModeToggle isDark={isDark} toggle={toggleTheme} />
                         </header>
+                        {renderBanners()}
                         <main className="max-w-3xl mx-auto p-6">
                             <div className="flex items-center justify-between mb-8">
                                 <h2 className="text-2xl font-bold">Projects</h2>
-                                <button onClick={() => setIsProjectModalOpen(true)} className="flex items-center space-x-2 bg-black dark:bg-white text-white dark:text-black px-4 py-2 rounded-lg hover:bg-gray-800 dark:hover:bg-gray-200 transition-colors"><Plus size={18} /><span>New Project</span></button>
+                                <div className="flex space-x-2">
+                                    <button onClick={() => fileInputImportRef.current?.click()} className="flex items-center space-x-2 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 transition-colors">
+                                        <UploadCloud size={18} />
+                                        <span>Import Project</span>
+                                    </button>
+                                    <input type="file" accept=".zip" ref={fileInputImportRef} onChange={(e) => {
+                                        const file = e.target.files[0];
+                                        if (file) {
+                                            importProjectBackup(file);
+                                        }
+                                        e.target.value = '';
+                                    }} className="hidden" />
+                                    <button onClick={() => setIsProjectModalOpen(true)} className="flex items-center space-x-2 bg-black dark:bg-white text-white dark:text-black px-4 py-2 rounded-lg hover:bg-gray-800 dark:hover:bg-gray-200 transition-colors">
+                                        <Plus size={18} />
+                                        <span>New Project</span>
+                                    </button>
+                                </div>
                             </div>
                             <div className="grid gap-6">
                                 {projects.map(p => (
@@ -2537,13 +3131,17 @@
                                 <div className="relative">
                                     <button onClick={() => setMenuOpen(!menuOpen)} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full dark:text-white"><MoreVertical size={20} /></button>
                                     {menuOpen && (
-                                        <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-xl border dark:border-gray-700 py-1 z-50">
+                                        <div className="absolute right-0 mt-2 w-52 bg-white dark:bg-gray-800 rounded-lg shadow-xl border dark:border-gray-700 py-1 z-50">
+                                            <button onClick={() => { setMenuOpen(false); exportProjectBackup(activeProjectId); }} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-sm dark:text-white font-medium">Export Backup (.zip)</button>
+                                            <button onClick={() => { setMenuOpen(false); clearPlanPagesCache(activeProjectId); }} className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-sm dark:text-white font-medium">Clear Floorplan Cache</button>
+                                            <div className="border-t dark:border-gray-700 my-1"></div>
                                             <button onClick={deleteProject} className="w-full text-left px-4 py-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 text-sm">Delete Project</button>
                                         </div>
                                     )}
                                 </div>
                             </div>
                         </header>
+                        {renderBanners()}
                         <main className="max-w-3xl mx-auto p-6">
                             <div className="flex items-center justify-between mb-6">
                                 <h2 className="text-xl font-bold dark:text-white">Field Reports</h2>
@@ -2712,6 +3310,7 @@
                             </>
                         )}
                     </header>
+                    {renderBanners()}
                     <div className="flex-1 relative overflow-hidden flex">
                         <ObservationListPanel
                             isOpen={isSidePanelOpen && !isDrawingMode}
@@ -2733,7 +3332,7 @@
                         />
                         <ObservationDrawer
                             isOpen={!!selectedPinId && !isDrawingMode}
-                            observation={activeObservation}
+                            observation={activeObservationDisplay}
                             onClose={() => setSelectedPinId(null)}
                             onChange={(field, value) => updateObservation(field, value)}
                             onTakePhoto={triggerCamera}
@@ -2773,11 +3372,8 @@
                                     }}
                                     pinScale={pinScale}
                                     isDrawingMode={isDrawingMode}
-                                    initialMarkup={activeObservation && activeObservation.planMarkup}
-                                    onSaveMarkup={(data) => {
-                                        updateObservation('planMarkup', data);
-                                        setIsDrawingMode(false);
-                                    }}
+                                    initialMarkup={activeMarkupUrl}
+                                    onSaveMarkup={handlePlanDrawingSave}
                                     onCancelMarkup={() => setIsDrawingMode(false)}
                                     drawingColor={drawingColor}
                                     drawingLineWidth={drawingLineWidth}
