@@ -19,7 +19,7 @@
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
     <!-- Babel for JSX -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
 
     <!-- PDF.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -131,6 +131,44 @@
             const u8arr = new Uint8Array(n);
             while (n--) u8arr[n] = bstr.charCodeAt(n);
             return new Blob([u8arr], { type: mime });
+        };
+
+        const resizeImage = (dataUrlOrBlob, maxWidth = 800) => {
+            return new Promise((resolve) => {
+                if (!dataUrlOrBlob) {
+                    resolve(null);
+                    return;
+                }
+                const img = new Image();
+                const url = typeof dataUrlOrBlob === 'string' ? dataUrlOrBlob : URL.createObjectURL(dataUrlOrBlob);
+                img.onload = () => {
+                    if (img.width <= maxWidth) {
+                        // No resizing needed, just convert to data URL if blob
+                        if (typeof dataUrlOrBlob === 'string') {
+                            resolve(dataUrlOrBlob);
+                        } else {
+                            const reader = new FileReader();
+                            reader.onload = (e) => resolve(e.target.result);
+                            reader.readAsDataURL(dataUrlOrBlob);
+                        }
+                        if (url !== dataUrlOrBlob) URL.revokeObjectURL(url);
+                        return;
+                    }
+                    const canvas = document.createElement('canvas');
+                    canvas.width = maxWidth;
+                    canvas.height = img.height * (maxWidth / img.width);
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    const resizedDataUrl = canvas.toDataURL('image/jpeg', 0.7); // 70% quality jpeg
+                    if (url !== dataUrlOrBlob) URL.revokeObjectURL(url);
+                    resolve(resizedDataUrl);
+                };
+                img.onerror = () => {
+                    if (url !== dataUrlOrBlob) URL.revokeObjectURL(url);
+                    resolve(null);
+                };
+                img.src = url;
+            });
         };
 
         const blobToDataURL = (blob) => {
@@ -1698,29 +1736,41 @@
                         const migratedProjs = [];
                         for (const proj of projs) {
                             let projChanged = false;
-                            const migratedReports = (proj.reports || []).map(report => {
+                            const migratedReports = [];
+                            for (const report of proj.reports || []) {
                                 let reportChanged = false;
-                                const migratedObs = (report.observations || []).map(obs => {
+                                const migratedObs = [];
+                                for (const obs of report.observations || []) {
                                     const cleaned = { ...obs };
                                     if (obs.image) {
-                                        db.observationPhotos.put({ observationId: obs.id, data: obs.image }).catch(console.error);
-                                        delete cleaned.image;
-                                        cleaned.hasPhoto = true;
-                                        reportChanged = true;
-                                        mediaMigCount++;
+                                        try {
+                                            const blob = typeof obs.image === 'string' && obs.image.startsWith('data:') ? dataURLtoBlob(obs.image) : obs.image;
+                                            await db.observationPhotos.put({ observationId: obs.id, data: blob });
+                                            delete cleaned.image;
+                                            cleaned.hasPhoto = true;
+                                            reportChanged = true;
+                                            mediaMigCount++;
+                                        } catch (putErr) {
+                                            console.error("Migration error writing photo for obs", obs.id, putErr);
+                                        }
                                     }
                                     if (obs.planMarkup) {
-                                        db.observationMarkups.put({ observationId: obs.id, data: obs.planMarkup }).catch(console.error);
-                                        delete cleaned.planMarkup;
-                                        cleaned.hasMarkup = true;
-                                        reportChanged = true;
-                                        mediaMigCount++;
+                                        try {
+                                            const blob = typeof obs.planMarkup === 'string' && obs.planMarkup.startsWith('data:') ? dataURLtoBlob(obs.planMarkup) : obs.planMarkup;
+                                            await db.observationMarkups.put({ observationId: obs.id, data: blob });
+                                            delete cleaned.planMarkup;
+                                            cleaned.hasMarkup = true;
+                                            reportChanged = true;
+                                            mediaMigCount++;
+                                        } catch (putErr) {
+                                            console.error("Migration error writing markup for obs", obs.id, putErr);
+                                        }
                                     }
-                                    return cleaned;
-                                });
+                                    migratedObs.push(cleaned);
+                                }
                                 if (reportChanged) projChanged = true;
-                                return reportChanged ? { ...report, observations: migratedObs } : report;
-                            });
+                                migratedReports.push(reportChanged ? { ...report, observations: migratedObs } : report);
+                            }
                             const finalProj = projChanged ? { ...proj, reports: migratedReports } : proj;
                             if (projChanged) {
                                 const { plans: _ignored, ...projData } = finalProj;
@@ -1741,10 +1791,16 @@
                         setProjects(hydratedProjects);
                         setLoading(false);
                         checkStorageQuota(setStorageWarning);
+                        window.appLoaded = true;
+                        const panel = document.getElementById('recovery-panel');
+                        if (panel) panel.classList.add('hidden');
                     } catch (e) {
-                        console.error('DB Load Error', e);
+                        console.error('DB Load Error details: ' + (e ? e.name + ' - ' + e.message + '\n' + e.stack : 'No error object'));
                         setDbError('Failed to load data from storage. Try reloading the page.');
                         setLoading(false);
+                        window.appLoaded = true;
+                        const panel = document.getElementById('recovery-panel');
+                        if (panel) panel.classList.add('hidden');
                     }
                 };
                 loadData();
@@ -2848,7 +2904,7 @@
                 const obsHtmlParts = [];
                 for (const obs of activeReport.observations) {
                     const obsPhoto = obs.hasPhoto ? await db_loadPhoto(obs.id).catch(() => null) : null;
-                    const photoSrc = obsPhoto ? await blobToDataURL(obsPhoto).catch(() => null) : null;
+                    const photoSrc = obsPhoto ? await resizeImage(obsPhoto, 800).catch(() => null) : null;
                     const sc = statusColors[obs.status] || { bg: '#f3f4f6', fg: '#374151' };
                     obsHtmlParts.push(`
                         <div class="obs-container">
@@ -3390,6 +3446,107 @@
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
+    </script>
+
+    <!-- App Recovery Mode Overlay -->
+    <div id="recovery-panel" class="hidden fixed bottom-4 right-4 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-4 shadow-2xl max-w-sm text-sm space-y-3">
+        <div class="font-bold text-red-600 dark:text-red-400 flex items-center gap-2">
+            <span>⚠️ App Recovery Mode</span>
+        </div>
+        <p class="text-xs text-gray-600 dark:text-gray-400">
+            SiteLens is taking longer than usual to start. If the screen is blank, you can use these tools to recover your work.
+        </p>
+        <div class="flex flex-col gap-2">
+            <button onclick="recoveryExportBackup()" class="w-full text-left px-3 py-2 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded font-semibold hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors">
+                📥 Export Text Backup (.json)
+            </button>
+            <button onclick="recoveryClearPlanCache()" class="w-full text-left px-3 py-2 bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded font-semibold hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors">
+                🧹 Clear Floor Plan Cache (Frees Space)
+            </button>
+            <button onclick="recoveryResetApp()" class="w-full text-left px-3 py-2 bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded font-semibold hover:bg-red-100 dark:hover:bg-red-900/50 transition-colors">
+                💥 Reset Application Database
+            </button>
+            <button onclick="document.getElementById('recovery-panel').classList.add('hidden')" class="w-full text-center py-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300">
+                Dismiss
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // Pure JS helper to show recovery panel if app doesn't load
+        window.addEventListener('DOMContentLoaded', () => {
+            const timeout = setTimeout(() => {
+                const panel = document.getElementById('recovery-panel');
+                if (panel && !window.appLoaded) {
+                    panel.classList.remove('hidden');
+                }
+            }, 5000); // 5 seconds
+            
+            window.addEventListener('error', (event) => {
+                console.error("Global JS Error:", event.error);
+                const panel = document.getElementById('recovery-panel');
+                if (panel) panel.classList.remove('hidden');
+            });
+        });
+
+        async function recoveryExportBackup() {
+            try {
+                if (typeof Dexie === 'undefined') {
+                    alert("Database library is not loaded.");
+                    return;
+                }
+                const db = new Dexie('SiteVisitsDB');
+                await db.open();
+                const projects = await db.table('projects').toArray();
+                const plans = await db.table('plans').toArray();
+                
+                const backupData = {
+                    version: 'recovery-v1',
+                    timestamp: new Date().toISOString(),
+                    projects: projects,
+                    plans: plans
+                };
+                
+                const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `sitelens_recovery_backup_${new Date().toISOString().slice(0, 10)}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                alert("Backup downloaded! You can import this file later.");
+            } catch (e) {
+                console.error('Recovery Export Error details: ' + (e ? e.name + ' - ' + e.message + '\n' + e.stack : 'No error object'));
+                alert("Failed to export backup: " + e.message);
+            }
+        }
+
+        async function recoveryClearPlanCache() {
+            if (!confirm("Are you sure you want to clear all floor plan page cache? Your projects, observations, and photos will NOT be deleted, but you will need to re-upload floor plans to view them.")) return;
+            try {
+                const db = new Dexie('SiteVisitsDB');
+                await db.open();
+                await db.table('planPages').clear();
+                alert("Floor plan image cache cleared! Try reloading the page now.");
+                location.reload();
+            } catch (e) {
+                alert("Failed to clear cache: " + e.message);
+            }
+        }
+
+        async function recoveryResetApp() {
+            if (!confirm("CRITICAL WARNING: This will delete ALL projects, reports, photos, and floor plans. This action cannot be undone.\n\nAre you absolutely sure you want to reset the app?")) return;
+            try {
+                const db = new Dexie('SiteVisitsDB');
+                await db.delete();
+                alert("Database deleted successfully! The page will now reload.");
+                location.reload();
+            } catch (e) {
+                alert("Failed to reset app: " + e.message);
+            }
+        }
     </script>
 </body>
 
